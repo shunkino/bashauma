@@ -18,6 +18,12 @@ CONFETTI=("🎉" "🎊" "✨" "🎈")
 COLS=$(tput cols 2>/dev/null || echo 40)
 ROWS=$(tput lines 2>/dev/null || echo 10)
 
+# Confetti emoji render two terminal cells wide, so a row holds half as many
+# of them as there are columns. Build rows in 2-cell slots (emoji, or two
+# spaces) to keep frames from overflowing and wrapping on narrow popups.
+SLOTS=$((COLS / 2))
+((SLOTS < 1)) && SLOTS=1
+
 cleanup() {
     tput cnorm 2>/dev/null || true
     clear
@@ -33,17 +39,17 @@ for ((frame = 0; frame < FRAMES; frame++)); do
     clear
     for ((row = 0; row < ROWS - 2; row++)); do
         line=""
-        for ((col = 0; col < COLS; col++)); do
-            if (((row * 7 + col * 3 + frame) % 11 == 0)); then
+        for ((slot = 0; slot < SLOTS; slot++)); do
+            if (((row * 7 + slot * 3 + frame) % 11 == 0)); then
                 line+="${CONFETTI[$((RANDOM % ${#CONFETTI[@]}))]}"
             else
-                line+=" "
+                line+="  "
             fi
         done
         printf '%s\n' "$line"
     done
     mid_row=$((ROWS / 2))
-    pad=$(((COLS - ${#MESSAGE} - 4) / 2))
+    pad=$(((COLS - ${#MESSAGE} - 6) / 2))
     ((pad < 0)) && pad=0
     tput cup "$mid_row" "$pad" 2>/dev/null || true
     printf '🎉 %s 🎉' "$MESSAGE"
