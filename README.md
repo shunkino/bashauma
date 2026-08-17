@@ -21,11 +21,27 @@ plugin in action.
 
 - **`herdr-plugin.toml`** — plugin manifest. Hooks the `pane.agent_status_changed`
   event and declares a `popup` pane (`winner`) for the celebration screen.
-- **`on_status_changed.sh`** — runs on every agent status change. Treats a
-  transition into `working` as "user just dispatched a task," tracks the
-  round's "done" pane set under `HERDR_PLUGIN_STATE_DIR/round.json`, redirects
-  focus to the next undone pane, and triggers the winner popup + round reset
-  once every open agent pane has been given a task.
+- **`on_status_changed.sh`** — runs on every agent status change, with two
+  independent behaviors:
+  - **Dispatch tracking**: treats a transition into `working` as "user just
+    dispatched a task," tracks the round's "done" pane set under
+    `HERDR_PLUGIN_STATE_DIR/round.json`, redirects focus to the next undone
+    pane, and triggers the winner popup + round reset once every open agent
+    pane has been given a task.
+  - **Finish-focus**: treats a transition *out of* `working` (into
+    idle/done/blocked) as "this agent just finished and needs attention,"
+    and redirects focus to it — unless the user's currently-focused pane
+    shows recent activity (typing or streaming output), in which case focus
+    is left alone. Activity is detected by diffing `pane read --source
+    visible` snapshots a short interval apart, since herdr doesn't expose a
+    hookable per-keystroke event or a `revision` counter that bumps for
+    in-progress typing (only for committed output lines).
+  - Both transitions are debounced (~1.5s) and re-verified before acting, to
+    filter out momentary status flicker (e.g. a sub-view like Copilot CLI's
+    "tasks" panel opening/closing) that isn't a real dispatch or finish.
+  - Per-pane last-known status is tracked in
+    `HERDR_PLUGIN_STATE_DIR/pane_status.json` to detect the working →
+    not-working transition.
 - **`winner_screen.sh`** — renders an ANSI confetti animation in the popup
   pane; dismisses on any keypress or after a few seconds.
 
