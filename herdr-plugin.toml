@@ -1,0 +1,19 @@
+id = "bashauma"
+name = "bashauma"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Forces you to give every open agent a task before celebrating a cleared board"
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["./on_status_changed.sh"]
+
+[[panes]]
+id = "winner"
+title = "🎉 Winner 🎉"
+platforms = ["linux", "macos"]
+placement = "popup"
+width = "80%"
+height = "60%"
+command = ["./winner_screen.sh"]
