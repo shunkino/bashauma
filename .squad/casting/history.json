@@ -1,0 +1,21 @@
+{
+  "universe_usage_history": [
+    {
+      "universe": "The Usual Suspects",
+      "assignment_id": "bashauma-herdr-20260818",
+      "used_at": "2026-08-18T21:09:26+09:00"
+    }
+  ],
+  "assignment_cast_snapshots": {
+    "bashauma-herdr-20260818": {
+      "universe": "The Usual Suspects",
+      "agents": {
+        "lead": "Keaton",
+        "shell-engineer": "Fenster",
+        "qa-reviewer": "Hockney",
+        "docs-release": "Verbal"
+      },
+      "created_at": "2026-08-18T21:09:26+09:00"
+    }
+  }
+}

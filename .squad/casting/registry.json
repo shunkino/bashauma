@@ -1,0 +1,32 @@
+{
+  "agents": {
+    "lead": {
+      "persistent_name": "Keaton",
+      "universe": "The Usual Suspects",
+      "created_at": "2026-08-18T21:09:26+09:00",
+      "legacy_named": false,
+      "status": "active"
+    },
+    "shell-engineer": {
+      "persistent_name": "Fenster",
+      "universe": "The Usual Suspects",
+      "created_at": "2026-08-18T21:09:26+09:00",
+      "legacy_named": false,
+      "status": "active"
+    },
+    "qa-reviewer": {
+      "persistent_name": "Hockney",
+      "universe": "The Usual Suspects",
+      "created_at": "2026-08-18T21:09:26+09:00",
+      "legacy_named": false,
+      "status": "active"
+    },
+    "docs-release": {
+      "persistent_name": "Verbal",
+      "universe": "The Usual Suspects",
+      "created_at": "2026-08-18T21:09:26+09:00",
+      "legacy_named": false,
+      "status": "active"
+    }
+  }
+}
