@@ -1,113 +1,298 @@
 # PRD: bashauma (Herdr Plugin)
 
+> 馬車馬のように働く — *"to work like a carriage horse."*
+> The agents are the carriage. The user is the horse.
+
 ## 1. Summary
-`bashauma` is a Herdr plugin that nudges users to keep every open agent tab moving forward. Every time the user sends a task/prompt to an agent, the plugin marks that tab as "done for this round" and automatically redirects the user's focus to the next agent tab that hasn't received a task yet. When every open agent tab has been given a task in the current round, the plugin shows a celebratory full-screen "winner" popup with 🎉/🎊 animation.
+
+`bashauma` is a Herdr plugin that treats **the user as the CPU** and **agents as
+processes**, and applies operating-system scheduling discipline to the user's
+attention.
+
+Its one job: when the user finishes dispatching a task to an agent, decide
+which agent deserves their attention next, and move focus there. Nothing else
+in the plugin is allowed to move focus.
+
+The result is a cooperative, non-preemptive scheduler for human attention:
+context switches happen *only* at points the user chose, and the plugin decides
+*where* they land — never *when*.
 
 ## 2. Problem
-Users juggling many agent tabs tend to over-focus on one or two agents (usually the most interesting/urgent one) and let others sit idle without a new task queued, even though there's always a "next task" waiting somewhere. There's no mechanism in Herdr today that nudges a user to distribute attention/tasks across all open agents, and no positive feedback loop for actually doing so.
 
-## 3. Goals
-- After the user sends a task to an agent in one tab, automatically move focus to the next agent tab that still needs a task this round.
-- Track, per "round," which open agent tabs have already received a task.
-- When all currently open agent tabs have received a task in the round, show a full-screen celebratory popup ("winner screen") with a 🎉/🎊 animation, then reset for the next round.
-- Handle tabs opening/closing mid-round gracefully (new tabs join the round as "not done yet"; closed tabs drop out of tracking).
-- Zero required configuration for default behavior.
+Users running many agent panes in parallel hit two failure modes:
 
-## 4. Non-Goals
-- Not a priority/attention-sorting shortcut (that's solved by existing `agent_panel_sort = priority` / sidebar navigation).
-- Does not block or prevent the user from re-focusing a tab manually — it nudges by auto-redirecting focus after a dispatch, but does not lock the UI.
-- No cross-machine/remote session support.
-- No persistent historical stats/leaderboard in v1 (just the per-round celebration).
+1. **Under-utilization.** The user tunnel-visions on one interesting agent
+   while others sit idle with no queued work. The parallelism they paid for
+   goes unused.
+2. **Attention thrash.** Every mechanism that tries to fix (1) by reacting to
+   *agent* events — "this agent just finished, look at it now" — preempts the
+   user mid-thought. Short tasks finish constantly, so the interrupt rate
+   scales with the number of agents, and the user spends their time servicing
+   interrupts instead of dispatching work. This cancels the benefit of running
+   agents in parallel and is actively irritating when it fires while the user
+   is typing.
 
-## 5. Users / Use Case
-A developer running many agent panes in parallel who wants a lightweight forcing function ("did I actually give everyone something to do?") plus a fun payoff for clearing the board, similar to an inbox-zero moment.
+The v0.1 implementation shipped both a scheduler (good) and an interrupt
+handler (bad), which is what this revision corrects.
+
+## 3. The model
+
+| OS concept | bashauma mapping |
+| --- | --- |
+| CPU (single core) | The user's attention — the genuinely scarce resource |
+| Process | An agent pane |
+| Process is *running* | `agent_status = working` — making progress without the user |
+| Process *blocked on I/O* | `agent_status = blocked` — stalled on a question/confirmation, cannot progress until the user answers |
+| Process *ready to run* | `agent_status = idle` / `done` — has no work queued, needs a task |
+| Context switch | `agent focus <pane>` |
+| Context-switch cost | The user's mental reload: recalling the repo, the task, the conversation |
+| `sched_yield()` | The user dispatching a task, or pressing the "next" key |
+| Scheduler | `bashauma` picking the next pane at a yield point |
+| System idle process | Nothing left to dispatch or answer → 🎉 winner screen |
+
+The central design decision follows directly from the model: a real OS may
+preempt a process because the OS can checkpoint and restore its full state. A
+human's in-flight state — a half-typed prompt, a half-formed plan — **cannot be
+checkpointed**. Therefore bashauma is strictly **non-preemptive**. Agent state
+changes update the ready queue; they never trigger a context switch.
+
+## 4. Goals
+
+- Keep every open agent fed, so agent-side parallelism stays saturated.
+- Move focus **only** at user-chosen yield points.
+- When focus does move, land on the highest-value agent, not merely the next
+  one in tab order.
+- Prefer cheap context switches (same workspace/tab) over expensive ones.
+- Guarantee no agent starves.
+- Provide a satisfying idle state (the celebration) when the queue drains.
+- Zero required configuration.
+
+## 5. Non-Goals
+
+- **No notifications.** bashauma never emits `herdr notification show`. Herdr
+  already has good notification plugins, and a second one competing for the
+  same surface is worse than none. Anything the user should be *told* about
+  belongs to a notification plugin; bashauma only decides *where focus goes
+  next*.
+- **No preemption, of any kind, ever.** No "focus the agent that just
+  finished", no timers that move focus, no interrupt-on-idle heuristics. If a
+  future feature needs to move focus without the user asking, it is out of
+  scope by definition.
+- **No activity/typing heuristics.** v0.1 diffed pane viewports to guess
+  whether the user was busy. Under a non-preemptive design that machinery is
+  unnecessary and is removed.
+- Not a replacement for Herdr's sidebar, `agent_panel_sort = priority`, or
+  manual navigation. The user can always navigate freely; bashauma only acts at
+  yield points.
+- No cross-machine/remote scheduling, no historical stats or leaderboards in
+  v1.
 
 ## 6. Functional Requirements
 
-### 6.1 Core loop
-1. **Detect dispatch.** Plugin listens for the signal that the user sent a task to an agent in a pane (see open question 6.4 on exact event/hook to use — likely a `pane.agent_status_changed` event hook firing when a pane transitions into `working` state, since that reflects an agent that just received and started acting on input).
-2. **Mark tab done for this round.** On detecting a dispatch for pane `X`, add `X` to the round's "done" set (persisted under `HERDR_PLUGIN_STATE_DIR`).
-3. **Redirect focus.** Immediately after marking `X` done, compute the set of currently open agent panes (via `agent.list`) minus the "done" set. If any remain, focus the first one (deterministic order, e.g. by workspace/tab order) via `agent.focus`, effectively pushing the user to their next task.
-4. **Detect round completion.** If the "done" set now equals the full set of currently open agent panes (and is non-empty), the round is complete:
-   - Open a **popup** pane (`placement = "popup"`) running a small script that renders a celebratory animation (🎉/🎊 confetti loop) using ANSI escape codes / simple frame animation in the terminal.
-   - The popup closes on any keypress or after a short timer (e.g. 3–5 seconds), whichever comes first.
-   - Reset the "done" set to empty, starting a fresh round.
-5. **Tab lifecycle during a round:**
-   - New agent pane opened mid-round → added to the "not done" pool automatically (since it's simply excluded from the "done" set); does not retroactively complete or invalidate the round.
-   - Agent pane closed mid-round → removed from both the "done" set and the "currently open" set, so it no longer blocks round completion.
+### 6.1 Yield points
 
-### 6.2 Manifest
-```toml
-id = "example.bashauma"
-name = "bashauma"
-version = "0.1.0"
-min_herdr_version = "0.7.0"
-description = "Forces you to give every open agent a task before celebrating a cleared board"
-platforms = ["linux", "macos", "windows"]
+Exactly two events cause bashauma to schedule:
 
-[[events]]
-on = "pane.agent_status_changed"
-command = ["python3", "on_status_changed.py"]
+1. **Dispatch yield** — the user sent a task to an agent. Detected via the
+   `pane.agent_status_changed` event hook when a pane transitions into
+   `working` (debounced and re-verified, see 6.6).
+2. **Explicit yield** — the user invokes the `next` action (a manifest
+   `[[actions]]` entry, bindable via `[[keybindings]]`). This is
+   `sched_yield()`: "I'm done here, give me the next one."
 
-[[panes]]
-id = "winner"
-title = "🎉 Winner 🎉"
-platforms = ["linux", "macos"]
-placement = "popup"
-width = "80%"
-height = "60%"
-command = ["python3", "winner_screen.py"]
-```
+No other event schedules. Agent status changes that are not a dispatch update
+the queue silently.
 
-### 6.3 Implementation language
-Any argv-executable language works (per Herdr's plugin model — no shell expansion, no SDK). Python recommended for straightforward JSON handling of `agent.list` output and simple terminal animation via ANSI escapes, with state tracked as a small JSON file under `HERDR_PLUGIN_STATE_DIR`.
+### 6.2 Ready queue and priority classes
 
-### 6.4 Open question: exact dispatch signal
-Herdr's declared plugin event hooks are driven off its internal `EventKind` set (e.g. `pane.agent_status_changed`, `pane.output_matched`, `tab.created`, `pane.created`, `worktree.created`, etc.). "User sent a task to an agent" doesn't have a single dedicated event; the closest approximate signal is a pane's `agent_status` transitioning into `working` (i.e., the agent just started acting on new input), captured via the `pane.agent_status_changed` event hook. This needs to be validated against the actual set of supported event hook names before implementation — if `working` transitions also fire for reasons unrelated to a user-sent task (e.g., agent auto-continuing on its own), the plugin may need additional filtering (e.g., comparing `state_change_seq` right after a `pane.send_text`/`pane.run` call made via this same plugin's action, rather than passively observing global state changes).
+At every yield, bashauma builds the runnable set from `agent list` and
+classifies each pane:
 
-**Recommended v1 approach to avoid ambiguity:** rather than passively hooking `pane.agent_status_changed`, wrap the actual send action — i.e., provide `bashauma`'s own action/keybinding (or pane command) that the user invokes to send text to the focused agent (`pane.send_text` / `pane.run` under the hood). This guarantees the plugin knows precisely when a task was dispatched by the user, and avoids false positives from agent-internal state changes.
+| Class | Condition | Rationale |
+| --- | --- | --- |
+| *not runnable* | `agent_status = working` | Already making progress; the user adds nothing |
+| *not runnable* | pane fed this epoch (see 6.3) | Already has work queued |
+| **P0 — blocked** | `agent_status = blocked` | The agent is stalled on the user. Unblocking it costs the user seconds and returns an agent to `working`, so it has the highest throughput payoff per unit of user attention |
+| **P1 — hungry** | `agent_status = idle` / `done`, not yet fed | Needs a new task |
 
-### 6.5 State
-Stored under `HERDR_PLUGIN_STATE_DIR` as a small JSON file, e.g.:
+Herdr's own `blocked` detection is the signal for P0: its bundled agent
+manifests classify confirmation prompts and input forms (rules such as
+`osc_title_plugin_confirmation_blocked`, `live_blocked_form`) as `blocked`.
+This is precisely the "the agent is asking me something" signal, and it is
+distinct from "the agent finished and its output could be reviewed" — the
+latter is not an event bashauma reacts to at all.
+
+### 6.3 Epochs
+
+An **epoch** is one pass over the runnable set. A pane is marked *fed* when the
+user dispatches to it, and the mark clears when the epoch ends. An epoch ends
+when the runnable set is empty — every open agent is either `working` or fed,
+and nothing is blocked. That is the idle state, and it triggers the winner
+screen (§8).
+
+Panes that open or close mid-epoch join or leave the runnable set naturally;
+closed panes are dropped from the fed set so they cannot wedge an epoch.
+
+### 6.4 Pick-next policy
+
+At a yield point, choose the next pane by:
+
+1. **P0 before P1.** Answering a stalled agent returns it to `working` fastest.
+2. **Affinity within a class.** Prefer a candidate in the same `tab_id`, then
+   the same `workspace_id`, then the same `cwd` as the pane the user is
+   leaving. Cross-workspace switches are the expensive ones — this is cache
+   affinity, and it is the difference between "next task" and "next context".
+3. **Aging across classes.** A P1 candidate whose wait exceeds
+   `aging_seconds` is promoted above P0 so review/dispatch work cannot be
+   starved by a chatty agent that keeps blocking.
+4. **FIFO within ties**, ordered by `state_change_seq` from `agent list`
+   (already exposed; no extra bookkeeping needed).
+5. If the runnable set is empty → idle → winner screen and epoch reset.
+
+Determinism matters: given the same queue state, the choice must be
+reproducible, so the user can build intuition about where they will land.
+
+### 6.5 What happens on a status change that is not a dispatch
+
+Nothing visible. The plugin records the pane's status for queue-building and
+exits. In particular, `working → idle`, `working → done`, and
+`working → blocked` **do not move focus**. They only change which class the
+pane will fall into at the *next* yield.
+
+### 6.6 Flicker filtering
+
+Some agents (e.g. GitHub Copilot CLI opening/closing its "tasks" sub-view)
+briefly flip detected status and back. Every dispatch detection is debounced
+(~1.5s) and re-verified with `agent get` before being treated as a yield.
+
+### 6.7 State
+
+Under `HERDR_PLUGIN_STATE_DIR`:
+
 ```json
 {
-  "round_done_pane_ids": ["pane_abc", "pane_def"]
+  "epoch_fed_pane_ids": ["w3:p1", "w5:p2"],
+  "pane_status": { "w3:p1": "working", "w5:p2": "blocked" },
+  "first_runnable_at": { "w5:p2": 1755400000 }
 }
 ```
-Read/write on every dispatch event; cleared on round completion.
 
-## 7. API Dependencies (existing, no core changes needed)
-- `agent.list` / `herdr agent list` — enumerate currently open agent panes.
-- `agent.focus` / `herdr agent focus <target>` — redirect focus to the next undone tab.
-- `pane.send_text` / `pane.run` — used if v1 wraps the send action directly (see 6.4).
-- `plugin.pane.open` with `placement = "popup"` — render the winner screen as a modal, session-wide popup that doesn't disturb the tiled layout.
-- `HERDR_PLUGIN_STATE_DIR` — persist the round's "done" set across invocations.
-- `HERDR_BIN_PATH` — portable CLI invocation from the plugin process.
+`first_runnable_at` is the queue-entry timestamp used for aging and FIFO
+ordering. All writes are serialized with an atomic lock, since the event hook
+can run concurrently for several panes.
 
-## 8. Winner Screen Spec
-- Rendered inside a `popup` pane (session-modal, doesn't affect tab layout).
-- Content: simple animated confetti/emoji loop (🎉🎊) using ANSI cursor movement and repeated frames — no external dependencies required, works in any terminal.
-- Suggested size: `width = "80%"`, `height = "60%"`.
-- Dismiss on any keypress (popup pane receives all terminal input while open) or auto-closes after a few seconds when the script exits.
-- Optional stretch: randomize the message ("Board cleared!", "Nice work!", etc.) each time.
+### 6.8 Configuration
+
+All optional; defaults require no config.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `on` | `on` \| `off` — `off` disables scheduling but keeps the `next` action |
+| `aging_seconds` | `300` | Wait after which a P1 candidate is promoted above P0 |
+| `affinity` | `tab` | `tab` \| `workspace` \| `none` — how aggressively to prefer nearby panes |
+| `parked_panes` | `[]` | Panes excluded from the runnable set entirely (long-running background agents) |
+
+## 7. API Dependencies
+
+All existing; no Herdr core changes required.
+
+- `pane.agent_status_changed` event hook — dispatch detection.
+- `agent list` — runnable set, plus `agent_status`, `state_change_seq`,
+  `tab_id`, `workspace_id`, `cwd`, `focused` for classification and affinity.
+- `agent get` — debounce re-verification.
+- `agent focus` — the context switch.
+- `[[actions]]` + `[[keybindings]]` — the explicit `next` yield.
+- `plugin.pane.open` with `placement = "popup"` — winner screen.
+- `HERDR_PLUGIN_STATE_DIR`, `HERDR_BIN_PATH` — state and portable CLI access.
+
+## 8. Winner screen
+
+- Fires when the runnable set drains: every open agent is `working` or fed, and
+  none are blocked. This is the system idle state, and it is a strictly better
+  win condition than v0.1's "everyone got one task", because it accounts for
+  agents that came back asking questions.
+- Rendered in a `popup` pane (session-modal, layout untouched), ANSI confetti,
+  dismissed on any keypress or after a few seconds.
+- Returns `ui_busy` if another modal is open — skip the celebration silently
+  rather than erroring.
+- Fires at most once per epoch.
 
 ## 9. Success Metrics
-- Qualitative: user reports feeling nudged to distribute tasks across tabs rather than tunnel-visioning on one agent.
-- No regressions to normal focus/pane navigation — `agent.focus` behaves identically to manual navigation between rounds.
-- Winner screen reliably triggers exactly once per completed round, with no double-fires or missed completions.
 
-## 10. Edge Cases
-- Zero agent panes open → no round tracking, no popup logic engaged.
-- Only one agent pane open → "round" completes as soon as the user dispatches to it once; celebration still fires (small win still counts).
-- User dispatches to the same pane twice in a row without visiting others → no redirect loop; pane is already in the "done" set, so the plugin just refocuses to the next undone pane (or does nothing if all are done and round completes).
-- Popup opening returns `ui_busy` if Settings/Copy mode/another modal is active — plugin should retry shortly after or skip the celebration gracefully rather than erroring loudly.
-- Pane closed exactly when round would complete → recompute the currently-open set at completion-check time (step 6.1.4) to avoid celebrating over a stale tab that no longer exists.
+- **Utilization**: a higher fraction of open agents in `working` at any moment,
+  compared to unassisted use.
+- **Zero unrequested context switches**: focus never moves except at a yield
+  point. This is a hard invariant, not a target.
+- **No starvation**: no runnable pane waits longer than `aging_seconds` past
+  its turn.
+- Qualitative: the user reports that landing somewhere after dispatch feels
+  like a continuation of their own intent, not an interruption of it.
 
-## 11. Rollout / Distribution
-- Ship as a standalone plugin repo, installable via `herdr plugin install <owner>/<repo>[/subdir]`.
-- Tag the repo with the GitHub topic `herdr-plugin` for marketplace discoverability (optional).
+## 10. Edge cases
 
-## 12. Open Questions
-- Confirm whether to hook passively on `pane.agent_status_changed` or wrap the send action directly (6.4) — recommend the latter for v1 to avoid false positives.
-- Should "done" order for redirect be workspace/tab creation order, or attention-priority order (reusing the sidebar's `blocked > done > working > idle > unknown` logic) so the "next task" nudge also respects urgency? Worth a v1.1 follow-up.
-- Should there be a way to opt out of a specific tab (e.g., a long-running background agent that doesn't need a new task each round) so it doesn't block round completion forever?
+- **Zero or one agent open** — scheduling is a no-op; a single agent still
+  completes an epoch and still celebrates.
+- **All agents blocked** — every pane is P0; the queue is fully runnable and
+  drains as the user answers. No deadlock is possible because the user is
+  always the one holding the lock.
+- **User dispatches to the same pane twice** — it is already fed; the scheduler
+  simply picks the next runnable pane.
+- **An agent that never needs tasks** (long-running watcher) — `parked_panes`
+  keeps it out of the runnable set so it cannot hold an epoch open.
+- **Herdr unreachable / `agent list` fails** — leave all state untouched and do
+  nothing. Never guess.
+
+## 11. Rollout
+
+- Ship as a standalone plugin repo, installable via
+  `herdr plugin install <owner>/<repo>`.
+- Tag the repo with the `herdr-plugin` GitHub topic for marketplace discovery.
+- Migration from v0.1: the finish-focus behavior and its viewport-diffing
+  activity detection are removed outright. Users who liked being pulled to
+  finished agents should install a notification plugin instead — that is the
+  correct surface for it.
+
+## 12. Future directions (OS principles not yet applied)
+
+These are deliberately deferred, but the model makes each of them a small,
+natural extension rather than a new feature bolted on:
+
+- **Multi-level feedback queue.** Track how much user time each agent consumes.
+  Agents that repeatedly block on trivial questions get demoted (they are
+  attention hogs); agents that run long stretches autonomously get promoted
+  (they are cheap and high-yield). Periodic priority boost prevents permanent
+  demotion.
+- **Shortest-job-first for human time.** Estimate the user-time cost of each
+  pending interaction with an exponential moving average of past interactions
+  (`τₙ₊₁ = α·tₙ + (1−α)·τₙ`) and schedule cheap answers first. SJF minimizes
+  mean waiting time, which here means agents spend less wall-clock time stalled
+  on the user.
+- **`nice` values and pinning.** Let the user bias the scheduler per pane
+  (`bashauma nice -5 w3:p2`), or pin themselves to one workspace for a stretch
+  (an affinity mask) when doing focused work.
+- **Admission control and thrash detection.** There is a degree of
+  multiprogramming beyond which the user's context-switch overhead exceeds the
+  throughput gained. Track mean queue wait and switch rate; when the system is
+  thrashing, tell the user they are running too many agents — the human
+  equivalent of a load average — and suggest parking some.
+- **Swapping.** Automatically park agents that have gone untouched for a long
+  time, and bring them back when the queue is quiet.
+- **Working-set restore.** On a context switch, surface the last question or
+  last few lines from the destination pane, so the user's mental cache is
+  warmed by the scheduler rather than by scrolling. This directly attacks
+  context-switch cost, which is the dominant term in the whole model.
+- **Gang scheduling.** Panes working on one feature across several repos are
+  visited as a group, so related context is loaded once.
+
+## 13. Open questions
+
+- Does `blocked` fire reliably for the agents this user actually runs
+  (Copilot CLI in particular)? Needs an empirical check. If coverage is thin,
+  the fallback signal is `terminal_title_stripped` or an output regex, both
+  supported by Herdr today.
+- Should the `next` action also be offered as "next, but skip this class"
+  (jump straight to hungry panes, ignoring blocked ones) for users who want to
+  batch dispatch work separately from answering questions?
+- Should an epoch boundary be visible at all when the user is mid-flow, or
+  should the celebration be suppressible (`mode = quiet`) for users who want
+  the scheduling without the confetti?
