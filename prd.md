@@ -122,6 +122,33 @@ This is precisely the "the agent is asking me something" signal, and it is
 distinct from "the agent finished and its output could be reviewed" — the
 latter is not an event bashauma reacts to at all.
 
+**`blocked` is a candidate, not a verdict.** Empirical testing against
+Copilot CLI (§14) shows the signal is real but noisy enough that acting on it
+directly would send the user to agents that are not asking anything. P0
+therefore requires a second, bashauma-owned confirmation:
+
+1. Herdr reports `agent_status = blocked` for the pane, **and**
+2. a `pane read --source visible` of the candidate's **bottom
+   `blocked_confirm_lines` non-empty lines** matches a prompt-hint pattern
+   (default: a line containing an `esc`-to-cancel hint together with an
+   `enter`-to-select/confirm/submit/accept hint).
+
+Bottom-anchoring is the entire point: herdr's Copilot rule scans a long
+`whole_recent` window, so any pane that merely *mentions* those phrases
+anywhere in recent scrollback is flagged. Better manifests (e.g. hermes) anchor
+to `bottom_non_empty_lines(N)` for exactly this reason. A candidate that fails
+confirmation is demoted to P1 for this epoch rather than discarded.
+
+This check runs **only at a yield point, only for `blocked` candidates** — one
+`pane read` per candidate. It is not polling, and it does not reintroduce
+preemption.
+
+Note that P0 quality varies per agent and can regress when herdr refreshes a
+remote detection manifest, so the confirmation step is mandatory, not an
+optimization. Agents whose manifests report `blocked` from an OSC title
+(a source that cannot go stale the way scrollback can) may skip step 2 in a
+later revision, but v1 confirms uniformly.
+
 ### 6.3 Epochs
 
 An **epoch** is one pass over the runnable set. A pane is marked *fed* when the
@@ -148,6 +175,14 @@ At a yield point, choose the next pane by:
 4. **FIFO within ties**, ordered by `state_change_seq` from `agent list`
    (already exposed; no extra bookkeeping needed).
 5. If the runnable set is empty → idle → winner screen and epoch reset.
+
+**False-claim demotion.** If the user is sent to a P0 pane and leaves it
+without dispatching, the P0 claim was wrong (stale prompt text, an
+already-answered prompt, or a detection false positive). That pane is demoted
+to P1 for the remainder of the epoch, and repeated demotions within a session
+suppress its P0 eligibility entirely. This is the multi-level-feedback-queue
+idea from §12 applied as a safety net: the scheduler learns to distrust a noisy
+signal instead of relying on the signal being correct.
 
 Determinism matters: given the same queue state, the choice must be
 reproducible, so the user can build intuition about where they will land.
@@ -191,6 +226,9 @@ All optional; defaults require no config.
 | `aging_seconds` | `300` | Wait after which a P1 candidate is promoted above P0 |
 | `affinity` | `tab` | `tab` \| `workspace` \| `none` — how aggressively to prefer nearby panes |
 | `parked_panes` | `[]` | Panes excluded from the runnable set entirely (long-running background agents) |
+| `blocked_confirm_lines` | `5` | Bottom non-empty lines inspected when confirming a P0 candidate (§6.2) |
+| `blocked_confirm_pattern` | built-in | Override regex for the prompt-hint confirmation |
+| `blocked_confirm` | `true` | Set `false` to trust herdr's `blocked` verbatim (not recommended; see §14) |
 
 ## 7. API Dependencies
 
@@ -225,6 +263,9 @@ All existing; no Herdr core changes required.
   point. This is a hard invariant, not a target.
 - **No starvation**: no runnable pane waits longer than `aging_seconds` past
   its turn.
+- **P0 precision**: a pane sent to the user as P0 is genuinely awaiting an
+  answer. Measured by the false-claim demotion rate (§6.4) — a rising rate
+  means the confirmation heuristic needs tuning.
 - Qualitative: the user reports that landing somewhere after dispatch feels
   like a continuation of their own intent, not an interruption of it.
 
@@ -234,8 +275,7 @@ All existing; no Herdr core changes required.
   completes an epoch and still celebrates.
 - **All agents blocked** — every pane is P0; the queue is fully runnable and
   drains as the user answers. No deadlock is possible because the user is
-  always the one holding the lock.
-- **User dispatches to the same pane twice** — it is already fed; the scheduler
+  always the one holding the lock.- **User dispatches to the same pane twice** — it is already fed; the scheduler
   simply picks the next runnable pane.
 - **An agent that never needs tasks** (long-running watcher) — `parked_panes`
   keeps it out of the runnable set so it cannot hold an epoch open.
@@ -286,13 +326,67 @@ natural extension rather than a new feature bolted on:
 
 ## 13. Open questions
 
-- Does `blocked` fire reliably for the agents this user actually runs
-  (Copilot CLI in particular)? Needs an empirical check. If coverage is thin,
-  the fallback signal is `terminal_title_stripped` or an output regex, both
-  supported by Herdr today.
+- ~~Does `blocked` fire reliably for Copilot CLI?~~ **Resolved by measurement —
+  see §14.** It fires for real prompts, but also false-positives badly, hence
+  the confirmation step in §6.2.
+- How long does a stale prompt hint linger in Copilot's `whole_recent` window
+  after the user answers? Bottom-line confirmation makes this mostly moot, but
+  it sets how aggressive false-claim demotion needs to be.
 - Should the `next` action also be offered as "next, but skip this class"
   (jump straight to hungry panes, ignoring blocked ones) for users who want to
   batch dispatch work separately from answering questions?
 - Should an epoch boundary be visible at all when the user is mid-flow, or
   should the celebration be suppressible (`mode = quiet`) for users who want
   the scheduling without the confetti?
+
+## 14. Appendix: measurement of the `blocked` signal
+
+Measured 2026-08-18 against herdr protocol 19, Copilot CLI 1.0.18, detection
+manifest `copilot.toml` version `2026.07.07.1`, on a live session of five
+Copilot agent panes.
+
+**Copilot state detection is entirely screen-scraped.** Herdr's Copilot
+integration hook reports only the agent *session id*
+(`pane.report_agent_session`) and exits for every non-`SessionStart` event, so
+no authoritative state ever reaches herdr. All state comes from one rule:
+
+```toml
+[[rules]]
+id = "selection_blocker"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+all = [
+  { any = [ {contains = ["esc to cancel"]}, {contains = ["esc cancel"]} ] },
+  { any = [ {contains = ["enter to select"]}, {contains = ["enter to confirm"]},
+            {contains = ["enter to submit"]}, {contains = ["enter accept"]} ] },
+]
+```
+
+**True positive: confirmed.** A live selection prompt renders
+
+```
+│ ↑/↓ to select · enter to confirm · esc to cancel │
+```
+
+which satisfies both clauses. Real prompts do produce `blocked`, so P0 has a
+usable basis.
+
+**False positive: confirmed, severe, sticky.** Because the region is
+`whole_recent` rather than the prompt area, a pane that merely *displays* those
+phrases anywhere in recent scrollback is flagged. During the test, the pane
+running this very analysis was reported `blocked` continuously for roughly
+15 minutes while actively working, because earlier command output contained the
+phrases. `herdr agent explain` attributed it to `selection_blocker` with
+evidence spanning long-stale output. Since blocked (priority 300) outranks
+`working_cancel_hint` (priority 100), the false positive *overrides* the
+correct working state.
+
+**`revision` is not a usable disambiguator.** The hoped-for "is output still
+moving?" check fails: `revision` stayed pinned at 17 across a busy stretch of
+the same pane, so a stalled and a working pane are indistinguishable by it.
+
+**Conclusions carried into the design:** P0 requires bottom-anchored
+confirmation (§6.2); false P0 claims must be self-correcting via demotion
+(§6.4); and the plugin must never assume a detection manifest is precise,
+because manifests are refreshed remotely and their quality varies per agent.
