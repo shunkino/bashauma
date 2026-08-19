@@ -143,3 +143,91 @@ were needed there.
 **Scope:** `prd.md` only, matching the pre-approved exception; no other
 prd.md content restructured, no changelog note added inside prd.md itself
 per instructions.
+
+## 2026-08-19T21:44:20+09:00: v1.1 follow-up docs sync (issues #1, #2)
+
+**What:** Read `gh issue view 1`/`2` and the current `lib/config.sh` /
+`lib/scheduler.sh` directly (not the issue summaries alone) before writing.
+
+- **Issue #1 (pane-lifetime P0 suppression):** `lib/scheduler.sh`'s prune
+  block now includes `p0_suppressed_pane_ids`/`demotion_count` alongside the
+  other four maps, pruned against the live `agent list` set on every
+  `schedule()` call. Fenster's comment there is explicit that this is a
+  deliberate reading of §6.4 ("survives an epoch" ≠ "survives the pane"),
+  and that herdr's `pane_id` counter is monotonic per-workspace and not
+  reused within a running session (confirmed empirically per the comment),
+  so in practice this only differs from "permanent" across an actual pane
+  close or a herdr server restart. Updated README's false-claim-demotion
+  prose and the `p0_suppress_after_demotions` config table row to say "for
+  as long as the pane stays open" instead of "for the rest of the
+  session," and corrected `prd.md` §6.4's one sentence to match (approved
+  standing exception for factual prd.md corrections).
+- **Issue #2 (silent config rejection):** `_config_to_int` now takes an
+  optional `<key name>` and emits `bashauma: config key '<key>' has invalid
+  value "<raw>" — using default <fallback>` to stderr only on outright
+  rejection (non-numeric, scientific notation, empty, null) — a valid
+  fractional value still truncates silently, no warning, matching existing
+  README language. Documented both paths explicitly as separate bullets so
+  the silent/warned distinction isn't glossed over. Added a "my config
+  isn't taking effect" Troubleshooting entry pointing at `herdr plugin log
+  list --plugin bashauma`, per Fenster's comment confirming (against the
+  live installed binary) that plugin-script stderr is captured per
+  invocation and retrievable there, not printed to the terminal or
+  otherwise visible.
+- **CHANGELOG.md:** added `1.0.1`, not `1.1.0` — both changes are fixes to
+  already-shipped v1.0.0 behavior (unbounded state growth, silent
+  misconfiguration), add no new config keys/commands, and don't change the
+  documented contract in a way users need to opt into. That reads as patch,
+  not minor, under ordinary semver judgment.
+- **Flag for the team:** `herdr-plugin.toml` still declares `version =
+  "1.0.0"`; if `1.0.1` is the agreed version number, that file needs a
+  matching bump — not edited here, it isn't mine to touch.
+
+**No further code/doc mismatches found** in the two touched files beyond
+what's listed above; `lib/scheduler.sh`'s and `lib/config.sh`'s comments
+were detailed enough to document the shipped behavior directly from source.
+
+## 2026-08-19T22:12:22+09:00: CHANGELOG stale-entry fix (Hockney's approval nit)
+
+**What:** Read `.squad/decisions/inbox/hockney-keaton-lineage-fix-approved.md`
+and `.squad/decisions/inbox/keaton-id-recycle-fix.md`, then read
+`lib/scheduler.sh` directly (`_demote_pane_to_p1`, `_lineage_trusted`,
+`_forget_stale_pane`, their wiring into the classification loop and the
+false-claim path) before rewriting anything — the prior 1.0.1 CHANGELOG
+entry described Fenster's rejected presence-only pruning fix, not what
+Keaton actually shipped.
+
+- Rewrote CHANGELOG's `1.0.1` issue #1 bullet: presence-based close-pruning
+  is kept (still real hygiene against unbounded `state.json` growth) but
+  the entry now leads with why that alone can't catch a recycled `pane_id`
+  after a herdr restart, and describes the actual fix — `state_change_seq`
+  used as a monotonic lineage fingerprint, `demotion_seq[pane_id]` stamped
+  per demotion, trust requiring both a recorded baseline and a
+  non-regressing observed seq, with either failure wiping that pane's
+  history and treating it as fresh. Kept `demotion_seq` mention here since
+  this *is* the state-schema-adjacent context; did not add it to README
+  since README doesn't enumerate `state.json`'s schema anywhere.
+  User-facing framing: a pane can no longer inherit another agent's
+  distrust, so a genuinely blocked agent won't be silently skipped.
+  Included Hockney's disclosed residual gap (restart-reset behavior of
+  `state_change_seq` unverified without disrupting a live session, worst
+  case no worse than the pre-fix bug) as a parenthetical in the same
+  bullet — no natural home existed for a separate "known limitations"
+  section, so didn't invent one.
+- README: the false-claim-demotion paragraph and the
+  `p0_suppress_after_demotions` config-table row previously said
+  suppression lasts "as long as the pane stays open" — corrected to "as
+  long as that pane's *identity* holds," explaining the lineage-fingerprint
+  verification in plain language (no `state.json` field names beyond the
+  already-config-facing `p0_suppress_after_demotions`, since `demotion_seq`
+  itself is an internal implementation detail per Keaton's note).
+- `prd.md` §6.4 left as-is: "repeated demotions suppress its P0 eligibility
+  entirely for as long as that pane stays open — closing the pane clears
+  the record" remains accurate at the spec's terse level of detail; the
+  recycled-ID lineage mechanism is implementation robustness, not a change
+  to the product-level rule prd.md states.
+- `herdr-plugin.toml`'s `1.0.1` bump by Keaton is consistent with
+  CHANGELOG's version number — confirmed, no action needed.
+
+No further code/doc mismatches found beyond the one nit this task was
+scoped to fix.

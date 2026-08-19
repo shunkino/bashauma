@@ -137,7 +137,7 @@ record_status() {
     state_release_lock
 }
 
-# _demote_pane_to_p1 <state json> <pane_id> <now_ms>
+# _demote_pane_to_p1 <state json> <pane_id> <now_ms> <observed_seq>
 # Shared false-claim-demotion bookkeeping (prd.md §6.4), used both when the
 # *previous* P0 winner left `blocked` without dispatching, and when a
 # candidate fails its P0 confirmation this yield. Prints the updated state
@@ -151,14 +151,91 @@ record_status() {
 # pane is permanently p0_suppressed and stops being considered for P0 at
 # all, per prd.md's "repeated demotions... suppress its P0 eligibility
 # entirely."
+#
+# Also stamps `demotion_seq[pane_id] = observed_seq` -- the `agent list`
+# `state_change_seq` seen for this pane_id right now, at the moment this
+# demotion is recorded. lib/scheduler.sh's _lineage_trusted() uses this to
+# detect a herdr server restart recycling this same ID onto a different
+# agent later (GitHub issue #1's restart/ID-reuse gap; see that function).
 _demote_pane_to_p1() {
-    local in_state="$1" pane_id="$2" now_ms="$3"
-    printf '%s' "$in_state" | jq -c --arg p "$pane_id" --argjson now "$now_ms" \
+    local in_state="$1" pane_id="$2" now_ms="$3" observed_seq="${4:-0}"
+    printf '%s' "$in_state" | jq -c --arg p "$pane_id" --argjson now "$now_ms" --argjson seq "$observed_seq" \
         --argjson threshold "${CONFIG_P0_SUPPRESS_AFTER_DEMOTIONS:-3}" '
         .demotion_count[$p] = ((.demotion_count[$p] // 0) + 1) |
         .p0_demoted_pane_ids = ((.p0_demoted_pane_ids // []) + [$p] | unique) |
         .first_runnable_at[$p] = $now |
+        .demotion_seq[$p] = $seq |
         if (.demotion_count[$p] >= $threshold) then .p0_suppressed_pane_ids = ((.p0_suppressed_pane_ids // []) + [$p] | unique) else . end
+    '
+}
+
+# _lineage_trusted <state json> <pane_id> <observed_seq>
+# Prints "true"/"false": whether pane_id's existing p0_suppressed_pane_ids/
+# p0_demoted_pane_ids/demotion_count bookkeeping can be trusted to be
+# about the SAME continuously-live pane observed at <observed_seq> right
+# now, rather than a different, now-gone agent that used to hold this ID
+# (GitHub issue #1, "the more serious half": Hockney's rejection of
+# Fenster's presence-only close-pruning fix, proven by
+# tests/cases/regression_id_recycle_suppression.sh).
+#
+# Why presence-based pruning alone cannot catch this: herdr allocates
+# pane_id (`wN:pM`) from a per-workspace counter that is monotonic for the
+# life of one running herdr server, but a server *restart* resets that
+# counter while state.json -- a plain file under $HERDR_PLUGIN_STATE_DIR,
+# untouched by the herdr process restarting -- keeps whatever suppression/
+# demotion bookkeeping it had. A brand-new agent can be allocated a
+# recycled ID that used to belong to a different, previously-suppressed,
+# now-permanently-gone agent. Because that recycled ID is, by
+# construction, never observed *absent* from `agent list` before it
+# reappears, a prune predicate keyed on "is this ID currently absent?" can
+# never remove its stale entry -- there is no schedule() call where the ID
+# is seen both closed and about to be reused.
+#
+# `state_change_seq` closes this without any new herdr call, and without
+# depending on internals (socket path, PID, server boot time) that aren't
+# part of herdr's documented plugin-facing surface: it is already present
+# on every `agent list` entry, and is monotonically non-decreasing for the
+# same continuously-live agent (confirmed live against the real herdr
+# 0.8.0-preview binary -- see
+# .squad/decisions/inbox/keaton-id-recycle-fix.md for what was checked and
+# why the alternatives were rejected). A pane_id's bookkeeping is trusted
+# only if BOTH:
+#   (a) a demotion_seq[pane_id] was actually recorded for it (a pane_id
+#       carrying suppression/demotion state with NO recorded demotion_seq
+#       predates this fix, or was seeded some other way, and cannot be
+#       verified -- so it is NOT trusted), and
+#   (b) the currently observed state_change_seq is >= that recorded value
+#       (a LOWER observed seq than what was last seen is impossible for
+#       the same live entity, and proves the ID was recycled).
+# Both failure modes resolve to "not trusted", which fails toward
+# forgiving a pane rather than permanently denying it P0 -- the worse
+# mistake here is silently starving a genuinely blocked, user-facing agent
+# forever (the bug this closes), not occasionally letting a pane re-earn
+# its demotion budget one extra time.
+_lineage_trusted() {
+    local in_state="$1" pane_id="$2" observed_seq="$3" recorded
+    recorded=$(printf '%s' "$in_state" | jq -r --arg p "$pane_id" '.demotion_seq[$p] // empty')
+    if [ -z "$recorded" ]; then
+        echo "false"
+        return
+    fi
+    awk -v obs="$observed_seq" -v rec="$recorded" 'BEGIN {
+        if ((obs + 0) >= (rec + 0)) { print "true" } else { print "false" }
+    }'
+}
+
+# _forget_stale_pane <state json> <pane_id>
+# Wipes pane_id's suppression/demotion bookkeeping entirely (used when
+# _lineage_trusted says it cannot be trusted), so it is judged as a
+# genuinely fresh candidate this yield -- per prd.md §6.2/§6.4 -- instead
+# of inheriting a stranger's history.
+_forget_stale_pane() {
+    local in_state="$1" pane_id="$2"
+    printf '%s' "$in_state" | jq -c --arg p "$pane_id" '
+        .p0_suppressed_pane_ids = ((.p0_suppressed_pane_ids // []) | map(select(. != $p))) |
+        .p0_demoted_pane_ids = ((.p0_demoted_pane_ids // []) | map(select(. != $p))) |
+        .demotion_count = ((.demotion_count // {}) | with_entries(select(.key != $p))) |
+        .demotion_seq = ((.demotion_seq // {}) | with_entries(select(.key != $p)))
     '
 }
 
@@ -249,16 +326,59 @@ schedule() {
 
 
     # --- prune closed panes from epoch-scoped state (§6.3) ------------------
+    #
+    # p0_suppressed_pane_ids and demotion_count (session-lifetime per §6.4,
+    # "repeated demotions within a session suppress its P0 eligibility
+    # entirely") are pruned here too, alongside the other four maps
+    # (including the new demotion_seq, below). This bounds unbounded
+    # state.json growth for pane IDs that close and stay closed -- pure
+    # hygiene, and it is real: herdr allocates pane_id (`wN:pM`) from a
+    # per-workspace monotonic counter that is never reused for the life of
+    # one running herdr server session (confirmed empirically -- `herdr
+    # pane list` on a long-running session shows gaps like p1,p2,p6,p8
+    # where closed panes' numbers were skipped, never recycled), so a
+    # closed pane's ID does not resurface as a *different* agent within
+    # the same session just because it's absent from `agent list` once.
+    #
+    # IMPORTANT (GitHub issue #1's "more serious half" -- Hockney's
+    # rejection of an earlier revision that claimed otherwise, proven by
+    # tests/cases/regression_id_recycle_suppression.sh): this presence-
+    # based prune does NOT, and structurally CANNOT, close the ID-reuse
+    # gap across a herdr **server restart**. A restart resets each
+    # workspace's pane_id counter while state.json -- a plain file,
+    # untouched by the herdr process restarting -- keeps whatever
+    # suppression/demotion bookkeeping it had. A recycled ID is, by
+    # construction, never observed *absent* from `agent list` before it
+    # reappears (that's what "recycled" means), so a prune predicate keyed
+    # on absence can never remove its stale entry: there is no schedule()
+    # call that ever sees the ID both closed and about to be reused. That
+    # gap is closed separately, below, by _lineage_trusted()/
+    # _forget_stale_pane() at classification time, using state_change_seq
+    # as a durable per-pane fingerprint rather than mere agent-list
+    # presence -- see _lineage_trusted()'s comment for the full mechanism
+    # and why this prune step alone was never going to be enough.
+    #
+    # demotion_count is deliberately left purely monotonic (no time-based
+    # decay) rather than "a pane that false-claimed twice hours ago isn't
+    # obviously untrustworthy now": that's GitHub issue #3, a distinct,
+    # still-open, orthogonal concern (decaying trust in a *verified-same*
+    # long-lived pane over time) from this fix (verifying a pane_id refers
+    # to the *same* pane at all before trusting its history) -- see
+    # .squad/decisions/inbox/keaton-id-recycle-fix.md for why this
+    # revision does not resolve or reshape issue #3.
     state=$(printf '%s' "$state" | jq -c --argjson open "$open_ids_json" '
         .epoch_fed_pane_ids = ((.epoch_fed_pane_ids // []) | map(select(. as $p | $open | index($p) != null))) |
         .pane_status = ((.pane_status // {}) | with_entries(select(.key as $k | $open | index($k) != null))) |
         .first_runnable_at = ((.first_runnable_at // {}) | with_entries(select(.key as $k | $open | index($k) != null))) |
-        .p0_demoted_pane_ids = ((.p0_demoted_pane_ids // []) | map(select(. as $p | $open | index($p) != null)))
+        .p0_demoted_pane_ids = ((.p0_demoted_pane_ids // []) | map(select(. as $p | $open | index($p) != null))) |
+        .p0_suppressed_pane_ids = ((.p0_suppressed_pane_ids // []) | map(select(. as $p | $open | index($p) != null))) |
+        .demotion_count = ((.demotion_count // {}) | with_entries(select(.key as $k | $open | index($k) != null))) |
+        .demotion_seq = ((.demotion_seq // {}) | with_entries(select(.key as $k | $open | index($k) != null)))
     ')
 
     # --- false-claim demotion (§6.4): the previous P0 winner left blocked, --
     # --- without dispatching -- the P0 claim was wrong.                    --
-    local last_winner last_winner_was_p0 last_winner_status already_fed
+    local last_winner last_winner_was_p0 last_winner_status last_winner_seq already_fed
     last_winner=$(printf '%s' "$state" | jq -r '.last_winner_pane_id // empty')
     last_winner_was_p0=$(printf '%s' "$state" | jq -r '.last_winner_was_p0 // false')
     if [ -n "$last_winner" ] && [ "$last_winner_was_p0" = "true" ]; then
@@ -266,7 +386,9 @@ schedule() {
             '[.[] | select(.pane_id == $p)][0].agent_status // empty')
         already_fed=$(printf '%s' "$state" | jq -r --arg p "$last_winner" '(.epoch_fed_pane_ids // []) | index($p) != null')
         if [ "$last_winner_status" = "blocked" ] && [ "$already_fed" != "true" ]; then
-            state=$(_demote_pane_to_p1 "$state" "$last_winner" "$now_ms")
+            last_winner_seq=$(printf '%s' "$agents_json" | jq -r --arg p "$last_winner" \
+                '[.[] | select(.pane_id == $p)][0].state_change_seq // 0')
+            state=$(_demote_pane_to_p1 "$state" "$last_winner" "$now_ms" "$last_winner_seq")
         fi
     fi
 
@@ -331,6 +453,21 @@ schedule() {
         if [ "$status" = "blocked" ]; then
             is_suppressed=$(printf '%s' "$state" | jq -r --arg p "$pane_id" '(.p0_suppressed_pane_ids // []) | index($p) != null')
             is_demoted=$(printf '%s' "$state" | jq -r --arg p "$pane_id" '(.p0_demoted_pane_ids // []) | index($p) != null')
+
+            # GitHub issue #1's restart/ID-reuse gap: before trusting
+            # inherited suppression/demotion for this pane_id, verify it
+            # is actually about the SAME continuously-live pane (see
+            # _lineage_trusted()'s comment). If not, forget the stale
+            # bookkeeping and fall through to evaluate this pane fresh,
+            # below, exactly as if it had never been demoted at all.
+            if [ "$is_suppressed" = "true" ] || [ "$is_demoted" = "true" ]; then
+                if [ "$(_lineage_trusted "$state" "$pane_id" "$seq")" != "true" ]; then
+                    state=$(_forget_stale_pane "$state" "$pane_id")
+                    is_suppressed="false"
+                    is_demoted="false"
+                fi
+            fi
+
             if [ "$is_suppressed" = "true" ] || [ "$is_demoted" = "true" ]; then
                 class="P1"
             elif [ "$CONFIG_BLOCKED_CONFIRM" = "false" ]; then
@@ -357,7 +494,7 @@ schedule() {
                 if [ "$cached" = "true" ]; then
                     class="P0"
                 else
-                    state=$(_demote_pane_to_p1 "$state" "$pane_id" "$now_ms")
+                    state=$(_demote_pane_to_p1 "$state" "$pane_id" "$now_ms" "$seq")
                     fra="$now_ms"
                     waited=0
                     class="P1"

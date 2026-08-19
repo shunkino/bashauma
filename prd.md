@@ -179,10 +179,11 @@ At a yield point, choose the next pane by:
 **False-claim demotion.** If the user is sent to a P0 pane and leaves it
 without dispatching, the P0 claim was wrong (stale prompt text, an
 already-answered prompt, or a detection false positive). That pane is demoted
-to P1 for the remainder of the epoch, and repeated demotions within a session
-suppress its P0 eligibility entirely. This is the multi-level-feedback-queue
-idea from §12 applied as a safety net: the scheduler learns to distrust a noisy
-signal instead of relying on the signal being correct.
+to P1 for the remainder of the epoch, and repeated demotions suppress its P0
+eligibility entirely for as long as that pane stays open — closing the pane
+clears the record. This is the multi-level-feedback-queue idea from §12
+applied as a safety net: the scheduler learns to distrust a noisy signal
+instead of relying on the signal being correct.
 
 Determinism matters: given the same queue state, the choice must be
 reproducible, so the user can build intuition about where they will land.

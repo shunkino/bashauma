@@ -30,10 +30,20 @@ STATE_DEFAULT_JSON='{
   "p0_demoted_pane_ids": [],
   "p0_suppressed_pane_ids": [],
   "demotion_count": {},
+  "demotion_seq": {},
   "winner_fired_epoch": false,
   "last_winner_pane_id": null,
   "last_winner_was_p0": false
 }'
+# demotion_seq: pane_id -> the `state_change_seq` (from `agent list`)
+# observed at the moment a demotion/suppression entry was last written for
+# that pane_id (GitHub issue #1's restart/ID-reuse gap). state_change_seq
+# is monotonically non-decreasing for the same continuously-live agent;
+# lib/scheduler.sh's _lineage_trusted() uses a *lower* observed seq than
+# what's recorded here as proof the pane_id was recycled by a herdr server
+# restart (whose reset per-workspace ID counters state.json, a plain file,
+# survives untouched) rather than being the same pane that earned the
+# suppression -- see lib/scheduler.sh for the full mechanism.
 
 _state_lock_held=0
 

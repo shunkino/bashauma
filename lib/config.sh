@@ -32,7 +32,7 @@ CONFIG_DEFAULT_JSON='{
   "p0_suppress_after_demotions": 3
 }'
 
-# _config_to_int <raw value> <fallback>
+# _config_to_int <raw value> <fallback> [<key name>]
 # Coerces a config value that must reach bash's integer-only `$(( ))`
 # arithmetic (aging_seconds, blocked_confirm_lines,
 # p0_suppress_after_demotions) into a safe integer. prd.md does not
@@ -44,18 +44,34 @@ CONFIG_DEFAULT_JSON='{
 #
 # Documented coercion rule: a valid (optionally negative, optionally
 # fractional) number is truncated toward zero (e.g. "30.9" -> 30, "-2.9"
-# -> -2). Anything else -- non-numeric garbage, empty, null -- falls back
-# to <fallback> rather than crashing. <fallback> is always one of our own
-# already-known-good defaults, so this never itself produces a bad value.
+# -> -2) -- this is expected, README-documented behavior and must NOT
+# warn. Anything else -- non-numeric garbage ("5m"), scientific notation
+# (1e3, which awk's numeric regex below deliberately does not accept),
+# a leading "+", surrounding whitespace, empty, or null -- is an outright
+# rejection: falls back to <fallback> (always one of our own
+# already-known-good defaults, so this never itself produces a bad value)
+# AND, if <key name> is given, emits a one-line stderr warning naming the
+# key, the offending value, and the default now in use.
+#
+# Confirmed live against the installed herdr 0.8.0-preview binary
+# (`herdr plugin log list --plugin bashauma` after `plugin action invoke
+# next` with a deliberately bad config value) that a plugin script's
+# stderr is NOT swallowed: herdr captures it per-invocation and it is
+# inspectable via `herdr plugin log list --plugin <id>` (each log entry
+# has its own "stderr" field). It is not proactively pushed into the
+# user's face the way a native herdr notification would be, but it is
+# real, retrievable, textual diagnostic output rather than dead output
+# going nowhere -- so a warning here is not theatre.
 _config_to_int() {
-    local raw="$1" fallback="$2"
-    awk -v v="$raw" -v d="$fallback" 'BEGIN {
-        if (v ~ /^-?[0-9]+(\.[0-9]+)?$/) {
-            printf "%d", v
-        } else {
-            printf "%d", d
-        }
-    }'
+    local raw="$1" fallback="$2" key="${3:-}"
+    if awk -v v="$raw" 'BEGIN { exit !(v ~ /^-?[0-9]+(\.[0-9]+)?$/) }'; then
+        awk -v v="$raw" 'BEGIN { printf "%d", v }'
+        return
+    fi
+    if [ -n "$key" ]; then
+        echo "bashauma: config key '$key' has invalid value \"$raw\" — using default $fallback" >&2
+    fi
+    printf '%s' "$fallback"
 }
 
 # config_load
@@ -115,7 +131,7 @@ config_load() {
     # source are caught. Fallbacks are our own compiled-in defaults --
     # never each other -- so a bad override can't cascade into another
     # bad value.
-    CONFIG_AGING_SECONDS=$(_config_to_int "$CONFIG_AGING_SECONDS" 300)
-    CONFIG_BLOCKED_CONFIRM_LINES=$(_config_to_int "$CONFIG_BLOCKED_CONFIRM_LINES" 5)
-    CONFIG_P0_SUPPRESS_AFTER_DEMOTIONS=$(_config_to_int "$CONFIG_P0_SUPPRESS_AFTER_DEMOTIONS" 3)
+    CONFIG_AGING_SECONDS=$(_config_to_int "$CONFIG_AGING_SECONDS" 300 "aging_seconds")
+    CONFIG_BLOCKED_CONFIRM_LINES=$(_config_to_int "$CONFIG_BLOCKED_CONFIRM_LINES" 5 "blocked_confirm_lines")
+    CONFIG_P0_SUPPRESS_AFTER_DEMOTIONS=$(_config_to_int "$CONFIG_P0_SUPPRESS_AFTER_DEMOTIONS" 3 "p0_suppress_after_demotions")
 }

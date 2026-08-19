@@ -56,3 +56,54 @@ Implemented v1 per Keaton's verified plan (`.squad/decisions/inbox/keaton-v1-imp
   into `on_status_changed.sh` rather than inside `schedule()` itself.
 
 📌 Team update (2026-08-18T22:37:23+09:00): v1 scheduler/state/config implementation merged into decisions.md; the lock-scope blocker found in Hockney's review was fixed by Keaton in a follow-up cycle (Fenster locked out of that revision per reviewer-protocol, as original author) — decided by Fenster/Hockney/Keaton.
+
+## 2026-08-19T21:36:10+09:00: v1.1 follow-ups — issues #1 and #2
+
+Implemented both v1.1 follow-up issues from Hockney's v1.0.0 re-review in
+one pass (both touch `lib/`):
+
+- **Issue #1** (`lib/scheduler.sh`): `schedule()`'s existing pane-close
+  pruning block now also prunes `p0_suppressed_pane_ids` and
+  `demotion_count`, matching the other four already-pruned maps.
+  Investigated herdr's actual pane-ID allocation first (not assumed):
+  0.8.0-preview allocates `wN:pM` from a per-workspace monotonic counter
+  that is never reused within one running server session -- confirmed
+  both empirically (gaps like `w6:p1,p2,p6` in a real long-running
+  session's `pane list`, closed pane numbers never recycled) and via
+  herdr's documented design. So same-session ID reuse (the issue's
+  "silent starvation" scenario) isn't the actual live risk; a herdr
+  *server restart* is, since the counter resets but `state.json` persists
+  on disk across restarts -- this fix closes that gap too, for free.
+  Design call made explicitly (and documented as a code comment at the
+  prune site, since it's a deliberate change to a spec-adjacent rule):
+  pruning on pane close, consistent with §6.3's closed-panes-dropped
+  precedent, even though §6.4 only promises epoch-survival not
+  pane-survival. Deferred `demotion_count` time-decay -- no PRD basis, no
+  existing per-demotion timestamp bookkeeping to build it on, and it's a
+  product decision that deserves its own issue.
+- **Issue #2** (`lib/config.sh`): `_config_to_int` gained an optional
+  `<key name>` arg; on outright rejection (not a valid, possibly
+  fractional, number) it now emits a one-line stderr warning naming the
+  key, offending value, and default, matching the codebase's existing
+  jq-missing-warning precedent. Valid fractional truncation (`2.7` -> `2`)
+  still does not warn -- verified directly. Answered the "does hook
+  stderr surface anywhere" question against the *real* installed herdr
+  0.8.0-preview (this repo is already linked as a live plugin in the
+  current session): wrote a bad `aging_seconds` value to the real
+  `~/.config/herdr/plugins/config/bashauma/config.json`, invoked
+  `herdr plugin action invoke next`, and confirmed via `herdr plugin log
+  list --plugin bashauma` that the exact warning text appears in that
+  invocation's `stderr` log field. herdr captures and retains
+  per-invocation stderr, inspectable via `herdr plugin log list` -- not a
+  warning nobody can ever read, so this was safe to ship as a real
+  warning rather than a docs-only fix. Test config removed immediately
+  after verification; no lasting change to the live setup.
+- `tests/run_tests.sh`: 12/12 case files, all assertions passing, both
+  before and after the change. `bash -n` and `shellcheck -x` clean on
+  every touched file (`lib/config.sh`, `lib/scheduler.sh`; `lib/state.sh`,
+  `on_status_changed.sh`, `next.sh`, `herdr-plugin.toml` re-verified
+  clean but unchanged).
+- Wrote regression test specs for Hockney (close-then-reopen state
+  pruning, config-warning-on-rejection, no-warning-on-valid-truncation)
+  in `.squad/decisions/inbox/fenster-v1.1-p0-prune-and-config-warn.md`
+  rather than touching `tests/` myself, per file ownership.

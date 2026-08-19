@@ -2,6 +2,48 @@
 
 All notable changes to `bashauma` are documented here.
 
+## 1.0.1
+
+Two v1.0.0 review follow-ups (GitHub issues #1, #2), both bug fixes to
+already-shipped behavior — no new config keys, no new commands, nothing
+that changes the documented contract in a way that needs a minor bump.
+
+### Fixed
+
+- `p0_suppressed_pane_ids` and `demotion_count` are now pruned from
+  `state.json` against the live pane set on every `schedule()` call (the
+  same as the other state maps), fixing unbounded `state.json` growth over
+  a long, high-churn session. On its own this presence-based pruning
+  can't catch a pane whose ID is recycled after a herdr server restart —
+  a recycled ID is never observed *absent* from `agent list` before it
+  reappears, so a prune keyed on absence can never remove its stale
+  entry. That gap is closed separately: `state_change_seq` (already
+  returned by `agent list`) is used as a monotonic lineage fingerprint —
+  a demotion now records the seq observed at the time, and a pane's
+  inherited suppression/demotion history is trusted only if a baseline
+  was actually recorded for it and the currently observed seq is at least
+  that baseline. Either check failing (no baseline, or a seq regression —
+  proof the ID changed hands) wipes that pane's history and treats it as
+  fresh. User-visible consequence: a pane can no longer inherit a
+  different, long-gone agent's distrust — you won't be silently skipped
+  in favor of lower-priority candidates when an agent is genuinely
+  blocked and asking you something, even across a herdr restart. Genuine,
+  continuously-live false-claimers are unaffected and still get
+  suppressed after `p0_suppress_after_demotions` demotions, same as
+  before. (Note: `state_change_seq`'s exact behavior across an actual
+  herdr server restart wasn't empirically verified — restarting a live
+  session to test it was avoided — but the fix doesn't depend on any
+  particular reset behavior; the worst case if the assumption is wrong is
+  "as forgiving as before the fix," never a new regression.) (#1)
+- `_config_to_int` (`lib/config.sh`) now emits a one-line stderr warning
+  when a numeric config value is outright rejected and its default is
+  substituted (e.g. `bashauma: config key 'aging_seconds' has invalid
+  value "5m" — using default 300`). A valid-but-fractional value still
+  truncates silently with no warning — that distinction is unchanged.
+  Warnings are readable via `herdr plugin log list --plugin bashauma`,
+  confirmed against the installed herdr binary as the only route to a
+  plugin script's stderr. (#2)
+
 ## 1.0.0
 
 Full scheduler rewrite per `prd.md`, correcting v0.1's core mistake: it

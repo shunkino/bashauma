@@ -182,3 +182,131 @@ progress; may need adjustment once Fenster's interface is final.
   standpoint.
 
 📌 Team update (2026-08-18T22:37:23+09:00): rejected Fenster's v1 (lock-scope + fractional-aging_seconds blockers), then approved-with-nits Keaton's fix after independent re-verification of both blocker fixes — decided by Hockney.
+
+## Session: review of Fenster's v1.1 follow-up (GitHub issues #1, #2)
+
+- Read both issues (`gh issue view 1`, `gh issue view 2`) and the actual
+  code (`lib/scheduler.sh`'s new close-pruning of
+  `p0_suppressed_pane_ids`/`demotion_count`; `lib/config.sh`'s
+  `_config_to_int` optional key-name + stderr warning).
+- Independently re-ran the full suite (did not take "12/12" on faith):
+  confirmed 12/12 baseline still green; re-ran `bash -n` and
+  `shellcheck -x` myself, clean.
+- Wrote the three regression tests Fenster explicitly asked for, plus one
+  more of my own:
+  - `regression_close_reopen_pruning.sh` (passes) — confirms the literal
+    close-then-reopen prune scenario from issue #1.
+  - `regression_config_warning.sh` (passes, 6/6) — confirms the exact
+    warning message text for `"5m"`, `1e3` (round-trips through jq as
+    `1E+3` — derived via jq in the test itself, not hand-guessed),
+    `"+5"`, whitespace, and empty string, plus confirms no warning for
+    valid fractional truncation (`2.7` → `2`).
+  - `regression_id_recycle_suppression.sh` (fails by design) — my own
+    addition, targeting the task's specific instruction to trace whether
+    Fenster's fix actually closes the herdr-restart/ID-reuse scenario he
+    named as "the more serious half."
+- Traced that scenario concretely and found it is **not** fixed:
+  pruning removes a suppression/demotion entry only when its pane_id is
+  observed *absent* from the live `agent list`. A recycled pane_id (after
+  a herdr server restart resets a workspace's ID counter) is, by
+  construction, never observed absent before it reappears — the very
+  first schedule() call post-restart already sees it as live, so the
+  prune predicate treats it as "still valid" and never removes the stale
+  entry. Fenster's code comment claiming this "closes that gap for free"
+  is incorrect. Proved with the new failing test: a genuinely blocked,
+  P0-confirmable pane that inherits a stale suppression record loses to
+  a lower-priority idle candidate instead of winning P0, exactly the
+  silent-permanent-denial failure the issue warned about.
+- Confirmed the fix genuinely does solve the other half (unbounded
+  growth for panes that close and stay closed) — kept that test as a
+  passing regression.
+- Checked whether pruning-on-close is itself exploitable by a flapping
+  pane: confirmed not, since herdr allocates pane IDs from a monotonic
+  per-workspace counter within a session (Fenster's own empirical
+  finding) — a pane closing and reopening mid-session gets a genuinely
+  new, higher-numbered ID, not its old suppressed one back. The only
+  reuse vector is a full herdr server restart, which a single agent
+  can't trigger on its own.
+- Confirmed §6.4's "suppression survives an epoch" promise still holds
+  for panes that stay open (only `epoch_fed_pane_ids`/
+  `p0_demoted_pane_ids` reset at epoch drain, not
+  `p0_suppressed_pane_ids`/`demotion_count`).
+- Verified all three `_config_to_int` call sites pass the correct key
+  name, and that the optional 3rd-arg pattern (`key="${3:-}"`) is safe
+  under bash 3.2 + `set -u` (same pattern already used throughout
+  `config_load`). Confirmed `lib/state.sh`'s `STATE_LOCK_STALE_SECONDS`
+  coercion is a separate, independent inline `awk` guard unaffected by
+  this signature change.
+- Judged the warning-noise question (config_load runs on every hook
+  invocation, so a persistent misconfiguration warns every time):
+  acceptable for v1 — not proactively surfaced to the user, and
+  persisting the warning for as long as the problem exists is arguably
+  correct, not noise to suppress. Not blocking; flagged as a possible
+  future nit only if `herdr plugin log list` volume becomes a complaint.
+- Regression swept §9, §5, §10, `mode=off`, §6.2, §6.4, and the 3-phase
+  lock discipline — all unaffected and still clean.
+- Wrote
+  `.squad/decisions/inbox/hockney-v1.1-review-rejected.md` with the full
+  findings.
+- **Verdict: REJECTED** (issue #1's fix specifically; issue #2 stands
+  approved on its own merits). Fenster is locked out of
+  `lib/scheduler.sh`'s close-pruning logic for this revision cycle per
+  reviewer-protocol. Naming **Keaton** (Lead) as fix agent — not the
+  author of this revision, and already familiar with this area of
+  `lib/scheduler.sh` from the prior v1 lock-scope fix.
+
+## Re-review: Keaton's `state_change_seq` lineage fix (2026-08-18)
+
+- Re-reviewed Keaton's second fix attempt for issue #1's "more serious
+  half" (recycled `pane_id` stale suppression). Design: `demotion_seq`
+  state field records the `state_change_seq` observed at each demotion;
+  new `_lineage_trusted()`/`_forget_stale_pane()` verify, at
+  classification time, that inherited suppression/demotion bookkeeping
+  belongs to the same continuously-live pane (missing baseline or a seq
+  regression wipes the history and judges the pane fresh).
+- Ran the suite myself (did not take 15/15 on faith): confirmed
+  `regression_id_recycle_suppression.sh` now passes for the right
+  reason (missing-baseline branch, not incidental reordering).
+- Independently investigated `state_change_seq`'s real scope against
+  the live herdr 0.8.0-preview binary (read-only, did not restart the
+  live server): values are tightly clustered across heterogeneous
+  panes/workspaces/agent-kinds, strong evidence it's a global/
+  server-wide counter, not per-pane as Keaton's writeup ambiguously
+  implied. Judged this refines rather than undermines the fix — a
+  full-server-restart reset of one shared counter is architecturally
+  safer to assume than N independent per-pane resets. The one
+  un-provable link (does this counter actually reset on a real
+  restart?) remains unverified by either of us (neither could safely
+  restart Shun's live session), but the failure mode if wrong is "no
+  worse than the pre-fix bug," not a new regression — not blocking.
+- Verified upgrade safety directly: fed a pre-1.0.1-shaped `state.json`
+  (no `demotion_seq` key at all) through `_forget_stale_pane`'s jq
+  pipeline — no crash, correct output. jq's null-safe indexing handles
+  the missing-key case; nothing here is bash `set -u`-sensitive.
+- Wrote and ran a new regression test,
+  `tests/cases/regression_suppression_survives_lineage_check.sh`,
+  specifically targeting the biggest risk in this design: does ordinary
+  (non-regressing) seq advancement for a genuinely continuous pane ever
+  get mistaken for "different pane" and erase legitimate suppression?
+  Confirmed no — a pane already at the suppression threshold correctly
+  stays suppressed as its own seq climbs normally. Suite now 16/16.
+- Re-traced §9 (single `agent focus` call site, unchanged reachability),
+  §6.4 determinism/lock discipline (`_forget_stale_pane`'s mutation runs
+  entirely inside the existing Phase-3 lock, no new lock calls,
+  deterministic given identical input state), and swept §5/§10/
+  `mode=off`/§6.2/Fenster's issue #2 work — all clean.
+- Confirmed `bash -n` + `shellcheck -x` clean against the actual macOS
+  bash 3.2.57 on this machine, and that the `awk`-based numeric
+  comparisons in `_lineage_trusted` are portable (BSD/GNU awk).
+- One non-blocking nit: `CHANGELOG.md`'s `## 1.0.1` entry text is now
+  stale — it still describes the old presence-based fix's "stops being
+  a hard guarantee across a restart" caveat, which this lineage fix is
+  specifically meant to close. Flagged for Verbal/Keaton to update the
+  CHANGELOG text or bump to 1.0.2; not gating this verdict.
+- Wrote
+  `.squad/decisions/inbox/hockney-keaton-lineage-fix-approved.md` with
+  full findings.
+- **Verdict: APPROVED WITH NITS.** Both prior blockers are genuinely
+  closed. The residual restart-reset uncertainty is well-evidenced,
+  honestly disclosed, and fails safe — not a blocker. Release may
+  proceed at 1.0.1 (with the CHANGELOG nit ideally picked up first).

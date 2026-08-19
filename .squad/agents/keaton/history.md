@@ -90,3 +90,63 @@ by hand outside the test harness.
 - Did not edit `tests/`, `README.md`, `CHANGELOG.md`, or `prd.md`.
 
 📌 Team update (2026-08-18T22:37:23+09:00): v1 implementation plan (herdr API verification, no [[keybindings]] in manifest) and the 3-phase lock-discipline fix for Hockney's rejected review are both merged into decisions.md — decided by Keaton.
+
+---
+
+## Session: v1.1 rejection fix cycle 2 — issue #1 pane-ID recycling gap
+
+Hockney rejected Fenster's v1.0.1 fix for GitHub issue #1: Fenster's
+presence-based close-pruning (`p0_suppressed_pane_ids`/`demotion_count`
+pruned by absence from `agent list`) genuinely fixed unbounded state
+growth but did not close the "more serious half" -- stale P0 suppression
+surviving a herdr server restart via pane_id recycling, proven by
+Hockney's new `tests/cases/regression_id_recycle_suppression.sh`. I was
+named fix agent again, Fenster locked out of `lib/scheduler.sh`'s
+close-pruning logic for this cycle.
+
+- Investigated the real herdr 0.8.0-preview binary directly (no
+  restart performed, to avoid disrupting Shun's live session): confirmed
+  no boot/PID/uptime/instance identifier exists anywhere in the
+  documented API (`status`, `api snapshot`, `api schema`); found a
+  `socket` path whose ctime/mtime circumstantially matches server start
+  time but is unverified across an actual restart and unsupported by the
+  test stub (no `status` subcommand at all); confirmed `agent_session` is
+  absent on at least one live pane (disqualifying it as a universal key);
+  confirmed `state_change_seq` is present on every `agent list` entry
+  with no new herdr call needed.
+- Chose a hybrid approach: `state_change_seq` as a monotonic per-pane
+  logical-clock fingerprint. New `demotion_seq` state field records the
+  seq observed at each demotion; new `_lineage_trusted()`/
+  `_forget_stale_pane()` helpers verify, at classification time, that
+  inherited suppression/demotion history is actually about the same
+  live pane before trusting it -- untrusted history is wiped and the
+  pane is judged fresh. Rejected restart-detection-via-socket (test
+  stub can't support it, no documented env var for the socket path, adds
+  a hot-path herdr call, unverified across a real restart) and pure
+  stronger-identity keying (`agent_session` not universal,
+  `terminal_id` durability unverified). Rejected pure timestamp-based
+  expiry as not verifying lineage and overlapping/conflating with issue
+  #3 (demotion_count decay), which remains separate and unresolved.
+- Corrected the close-pruning block's comment (previously claimed,
+  incorrectly, to close the restart gap "for free" -- Hockney's
+  specific rejection point) and added `demotion_seq` to the maps it
+  prunes for growth hygiene.
+- Updated `_demote_pane_to_p1()` to take and stamp an `observed_seq`;
+  wired `seq`-passing through both demotion call sites (failed P0
+  confirmation, and the previous-winner false-claim path).
+- Verification: `bash -n`/`shellcheck -x` clean on all 5 owned files.
+  `tests/run_tests.sh`: 15/15 pass (12 originals + Fenster's
+  `regression_close_reopen_pruning` + `regression_config_warning` +
+  Hockney's `regression_id_recycle_suppression`). Hand-traced both new
+  regression tests against the fix before writing code to confirm
+  neither would conflict.
+- Did not restart the live herdr server; documented that evidentiary
+  gap explicitly, and reasoned why the fix's correctness does not
+  actually depend on unverified restart-behavior details of
+  `state_change_seq`.
+- Bumped `herdr-plugin.toml` version 1.0.0 -> 1.0.1 to match Verbal's
+  already-recorded CHANGELOG entry; no new config key this cycle.
+- Wrote `.squad/decisions/inbox/keaton-id-recycle-fix.md` with full
+  reasoning, live-herdr findings, and explicit non-resolution of issue
+  #3, for Hockney/Rai/Verbal.
+- Did not edit `tests/`, `README.md`, `CHANGELOG.md`, or `prd.md`.

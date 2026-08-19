@@ -154,8 +154,19 @@ for the measurement that justifies this — short version: Copilot CLI's
 against a prompt-hint pattern itself. If a pane fails that check, it's
 demoted to P1 for the epoch. If you get sent to a P0 pane and leave without
 dispatching, the same thing happens — the claim was wrong, so the pane drops
-to P1, and `p0_suppress_after_demotions` demotions (default `3`) permanently
-disqualify it from P0 for the rest of the session.
+to P1, and `p0_suppress_after_demotions` demotions (default `3`) disqualify
+it from P0 for as long as that pane's *identity* holds. Suppression is
+verified, not just remembered by `pane_id`: each demotion stamps the
+`agent list` sequence number (`state_change_seq`) seen at the time, and a
+pane only inherits its own suppression history if that number hasn't gone
+backwards since. A closed pane's record is dropped outright, and — the
+harder case — if a herdr restart ever recycles a `pane_id` onto a brand-new
+agent, that agent's sequence number won't match what was recorded for its
+predecessor, so it starts with a clean slate instead of inheriting a
+stranger's distrust. In practice this means: a pane that keeps falsely
+claiming P0 stays suppressed for as long as it's genuinely the same live
+agent, but you're never permanently and silently denied P0 by an agent
+that merely reused an old pane's ID.
 
 ## Configuration
 
@@ -174,7 +185,7 @@ for a handful of scalar knobs isn't worth adding.
 | `blocked_confirm_lines` | `5` | Bottom non-empty lines inspected when confirming a P0 candidate. |
 | `blocked_confirm_pattern` | built-in `esc`/`enter` prompt-hint regex | Override regex for the prompt-hint confirmation. |
 | `blocked_confirm` | `true` | Set `false` to trust herdr's `blocked` verbatim (not recommended — see the §14 note above). |
-| `p0_suppress_after_demotions` | `3` | How many times a pane can falsely claim P0 (a demotion — see below) before the scheduler stops trusting its `blocked` signal for the rest of the session. |
+| `p0_suppress_after_demotions` | `3` | How many times a pane can falsely claim P0 before the scheduler stops trusting its `blocked` signal — for as long as it's provably the same live pane (see above). |
 
 Example `config.json`:
 
@@ -202,12 +213,24 @@ one-off tuning without touching the config file:
 
 `aging_seconds`, `blocked_confirm_lines`, and `p0_suppress_after_demotions`
 are the three numeric knobs the scheduler does integer arithmetic with. Each
-is coerced rather than trusted verbatim: a valid number (optionally negative,
-optionally fractional) is truncated toward zero (`"30.9"` → `30`), and
-anything else — non-numeric garbage, an empty string, `null` — silently
-falls back to that key's own default. A typo in `config.json` or a
-`BASHAUMA_*` override therefore never crashes the scheduler; it just quietly
-behaves as if you hadn't set it.
+is coerced rather than trusted verbatim, and the two failure modes are
+treated differently:
+
+- A **valid but fractional** number truncates toward zero silently — no
+  warning, this is expected, documented behavior (`"30.9"` → `30`,
+  `"-2.9"` → `-2`).
+- An **outright invalid** value (non-numeric garbage like `"5m"`, scientific
+  notation like `1e3`, a leading `+`, surrounding whitespace, empty, or
+  `null`) falls back to that key's own compiled-in default **and emits a
+  one-line warning to stderr**, e.g.:
+
+  ```
+  bashauma: config key 'aging_seconds' has invalid value "5m" — using default 300
+  ```
+
+A typo therefore never crashes the scheduler — it quietly behaves as if you
+hadn't set it — but it isn't silent either. See Troubleshooting below for
+where that stderr output actually goes.
 
 Two knobs live outside `config.json` because they're plugin-internal timing,
 not scheduling policy, and pre-date the config file:
@@ -259,6 +282,17 @@ script it and add new cases. Passing green is a reasonable release gate.
 
 ## Troubleshooting
 
+- **My config isn't taking effect.** A config value that's outright invalid
+  (not just fractional) is rejected and replaced with its default, and
+  logs a one-line warning — but plugin-script stderr isn't printed to your
+  terminal, so you won't see it there. Read it with:
+
+  ```sh
+  herdr plugin log list --plugin bashauma
+  ```
+
+  Each entry carries its own stderr, so this is also the answer to "did my
+  `next` press actually do anything?" in general — check here first.
 - **Nothing happens on dispatch.** Confirm the plugin is enabled
   (`herdr plugin list`) and that `jq` is installed — the hook exits silently
   without it. Check `herdr plugin log list` for what actually ran.
