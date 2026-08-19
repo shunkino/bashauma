@@ -107,3 +107,5 @@ one pass (both touch `lib/`):
   pruning, config-warning-on-rejection, no-warning-on-valid-truncation)
   in `.squad/decisions/inbox/fenster-v1.1-p0-prune-and-config-warn.md`
   rather than touching `tests/` myself, per file ownership.
+
+📌 Team update (2026-08-19T21:36:10+09:00): Keaton shipped the issue #1 fix as a `state_change_seq`-based lineage check (`_lineage_trusted`/`_forget_stale_pane`), not a stronger presence-prune. My close-pruning code is kept for unbounded-growth hygiene, but my code comment claiming it also closed the restart/pane_id-recycle gap was wrong and has been corrected — decided by Keaton, approved by Hockney.
