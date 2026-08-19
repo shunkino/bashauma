@@ -1,13 +1,20 @@
 id = "bashauma"
 name = "bashauma"
-version = "0.1.0"
-min_herdr_version = "0.7.0"
-description = "Forces you to give every open agent a task before celebrating a cleared board"
+version = "1.0.0"
+min_herdr_version = "0.8.0"
+description = "A non-preemptive scheduler for your attention across open agent panes"
 platforms = ["linux", "macos"]
 
 [[events]]
 on = "pane.agent_status_changed"
 command = ["./on_status_changed.sh"]
+
+[[actions]]
+id = "next"
+title = "bashauma: next"
+description = "Yield to the scheduler — move focus to the highest-priority runnable pane"
+command = ["./next.sh"]
+platforms = ["linux", "macos"]
 
 [[panes]]
 id = "winner"

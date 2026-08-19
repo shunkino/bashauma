@@ -1,0 +1,143 @@
+#!/bin/bash
+# bashauma test fixture: fake `herdr` CLI.
+#
+# Stands in for the real `herdr` binary during tests. Tests put this file's
+# directory first on PATH (see tests/lib/harness.sh:setup_test) and export it
+# as HERDR_BIN_PATH, matching how the real plugin resolves the CLI
+# ("${HERDR_BIN_PATH:-herdr}").
+#
+# Every invocation is appended to $HERDR_STUB_LOG (one line per call, argv
+# joined with spaces) so tests can assert on exactly what the scheduler did —
+# in particular, that `agent focus` was or was not called.
+#
+# Scripted responses are read from files under $HERDR_STUB_DIR, which each
+# test controls directly (see harness.sh helpers: stub_set_agent_list,
+# stub_set_pane_read, stub_set_agent_get, stub_fail_agent_list, ...):
+#
+#   $HERDR_STUB_DIR/agent_list.json         -> raw stdout for `agent list`
+#   $HERDR_STUB_DIR/agent_list.fail         -> if present, `agent list` fails
+#   $HERDR_STUB_DIR/agent_get/<pane_id>.json -> raw stdout for `agent get <id>`
+#   $HERDR_STUB_DIR/pane_read/<pane_id>.txt  -> raw stdout for `pane read <id> ...`
+#   $HERDR_STUB_DIR/pane_list.json          -> raw stdout for `pane list`
+#   $HERDR_STUB_DIR/focus.fail              -> if present, `agent focus` fails
+#   $HERDR_STUB_DIR/winner.ui_busy          -> if present, winner popup open
+#                                              returns as if ui_busy
+#
+# `agent get <pane_id>` falls back to looking the pane up in agent_list.json
+# if no per-pane fixture exists, so tests only have to script the one file
+# for the common case.
+set -euo pipefail
+
+: "${HERDR_STUB_DIR:?HERDR_STUB_DIR must be set for the herdr test stub}"
+: "${HERDR_STUB_LOG:=$HERDR_STUB_DIR/herdr_invocations.log}"
+
+printf '%s\n' "$*" >>"$HERDR_STUB_LOG"
+
+# Concurrency instrumentation (used by regression tests, e.g.
+# tests/cases/regression_lock_scope.sh): records, for every invocation,
+# whether the *real* production state lock directory
+# ($HERDR_PLUGIN_STATE_DIR/state.lock, from lib/state.sh) is currently held.
+# This lets a black-box test detect "herdr was called while bashauma's own
+# state lock was held" deterministically, without timing races.
+if [ -n "${HERDR_PLUGIN_STATE_DIR:-}" ] && [ -d "$HERDR_PLUGIN_STATE_DIR/state.lock" ]; then
+    printf '%s\n' "$*" >>"$HERDR_STUB_DIR/lock_held_during.log"
+fi
+
+subcommand="${1:-}"
+
+case "$subcommand" in
+agent)
+    case "${2:-}" in
+    list)
+        if [ -e "$HERDR_STUB_DIR/agent_list.fail" ]; then
+            echo "herdr: agent list: fixture-forced failure" >&2
+            exit 1
+        fi
+        if [ -s "$HERDR_STUB_DIR/agent_list.json" ]; then
+            cat "$HERDR_STUB_DIR/agent_list.json"
+        else
+            printf '%s\n' '{"result":{"agents":[]}}'
+        fi
+        ;;
+    get)
+        pane_id="${3:-}"
+        get_file="$HERDR_STUB_DIR/agent_get/$pane_id.json"
+        if [ -s "$get_file" ]; then
+            cat "$get_file"
+        elif [ -s "$HERDR_STUB_DIR/agent_list.json" ]; then
+            # Fall back to synthesizing an `agent get` response from the
+            # scripted agent list, so tests usually only need one fixture.
+            jq -c --arg id "$pane_id" \
+                '{result:{agent: (.result.agents[] | select(.pane_id == $id))}}' \
+                "$HERDR_STUB_DIR/agent_list.json"
+        else
+            printf '%s\n' '{"result":{"agent":null}}'
+        fi
+        ;;
+    focus)
+        pane_id="${3:-}"
+        if [ -e "$HERDR_STUB_DIR/focus.fail" ]; then
+            echo "herdr: agent focus: fixture-forced failure" >&2
+            exit 1
+        fi
+        printf '%s\n' "$pane_id" >>"$HERDR_STUB_DIR/focus_calls.log"
+        printf '%s\n' '{"result":{}}'
+        ;;
+    *)
+        echo "herdr stub: unhandled 'agent ${2:-}'" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+pane)
+    case "${2:-}" in
+    read)
+        pane_id="${3:-}"
+        read_file="$HERDR_STUB_DIR/pane_read/$pane_id.txt"
+        if [ -f "$read_file" ]; then
+            cat "$read_file"
+        fi
+        # No fixture -> empty pane, which is a legitimate scripted case.
+        ;;
+    list)
+        if [ -s "$HERDR_STUB_DIR/pane_list.json" ]; then
+            cat "$HERDR_STUB_DIR/pane_list.json"
+        else
+            printf '%s\n' '{"result":{"panes":[]}}'
+        fi
+        ;;
+    *)
+        echo "herdr stub: unhandled 'pane ${2:-}'" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+plugin)
+    case "${2:-}" in
+    pane)
+        case "${3:-}" in
+        open)
+            printf '%s\n' "winner-screen-opened" >>"$HERDR_STUB_DIR/winner_calls.log"
+            if [ -e "$HERDR_STUB_DIR/winner.ui_busy" ]; then
+                echo '{"error":"ui_busy"}' >&2
+                exit 1
+            fi
+            printf '%s\n' '{"result":{}}'
+            ;;
+        *)
+            echo "herdr stub: unhandled 'plugin pane ${3:-}'" >&2
+            exit 2
+            ;;
+        esac
+        ;;
+    *)
+        echo "herdr stub: unhandled 'plugin ${2:-}'" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+*)
+    echo "herdr stub: unhandled command '$subcommand'" >&2
+    exit 2
+    ;;
+esac

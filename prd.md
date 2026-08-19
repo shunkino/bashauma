@@ -97,8 +97,8 @@ Exactly two events cause bashauma to schedule:
    `pane.agent_status_changed` event hook when a pane transitions into
    `working` (debounced and re-verified, see 6.6).
 2. **Explicit yield** — the user invokes the `next` action (a manifest
-   `[[actions]]` entry, bindable via `[[keybindings]]`). This is
-   `sched_yield()`: "I'm done here, give me the next one."
+   `[[actions]]` entry; the user binds a key to it in their own herdr
+   config). This is `sched_yield()`: "I'm done here, give me the next one."
 
 No other event schedules. Agent status changes that are not a dispatch update
 the queue silently.
@@ -239,7 +239,8 @@ All existing; no Herdr core changes required.
   `tab_id`, `workspace_id`, `cwd`, `focused` for classification and affinity.
 - `agent get` — debounce re-verification.
 - `agent focus` — the context switch.
-- `[[actions]]` + `[[keybindings]]` — the explicit `next` yield.
+- `[[actions]]` — declares the `next` action; the explicit yield's key
+  binding is user-side config, not a plugin capability.
 - `plugin.pane.open` with `placement = "popup"` — winner screen.
 - `HERDR_PLUGIN_STATE_DIR`, `HERDR_BIN_PATH` — state and portable CLI access.
 
