@@ -231,3 +231,75 @@ Keaton actually shipped.
 
 No further code/doc mismatches found beyond the one nit this task was
 scoped to fix.
+
+## Session: v1.1 spec amendment — predictability, workspace-locality tier, `explain` action
+
+Read `.squad/design/v1.1-scheduling.md` in full and
+`.squad/decisions/inbox/fact-checker-devils-advocate-abc.md`. Waited for
+Fenster's implementation to land (background sibling `fenster-2`), then read
+the final `lib/scheduler.sh` (`_workspace_locality_rank`,
+`_classify_candidate`, `explain_decision`, `_print_explain_report`,
+`_explain_write_artifact`, the A-0 stderr logging lines, the final
+`sort_by` cascade key), `explain.sh`, and `herdr-plugin.toml` (confirmed
+`version = "1.1.0"`, matching what was expected — no mismatch to flag).
+Confirmed via `git diff lib/config.sh` that no config keys changed this
+cycle.
+
+Edits made:
+
+- `prd.md` §6.4: rewrote the determinism sentence. Old text conflated
+  reproducibility (identical inputs → identical output, which a weighted
+  score also satisfies) with predictability (a human can anticipate the
+  result without simulating the algorithm — the actual property "build
+  intuition about where they will land" requires). New text states
+  predictability as the explicit requirement and ties it directly to why
+  the cascade is a lexicographic tier order rather than a weighted score.
+  Written as a spec clarification in prd.md's existing terse voice — no
+  narration of the debate, no names/credit, per Keaton's instruction that
+  this correction stands on its own regardless of what else ships.
+- `prd.md` §6.4: added the workspace-locality tier to the documented
+  cascade as item 4 (between affinity and FIFO), matching the shipped sort
+  key `aged_rank, class_rank, affinity_rank, workspace_locality_rank, seq,
+  pane_id` and the design doc's placement. Described as a hard gate that
+  can only break ties among candidates surviving every earlier tier.
+- `prd.md` §6.1: added one paragraph noting `explain` as a third action
+  that is explicitly *not* a yield point (never focuses).
+- `prd.md` §7: updated the `[[actions]]` dependency line to cover both
+  `next` and `explain` (no new dependency entry needed, per the design
+  doc — `[[actions]]` was already listed).
+- `README.md`: extended the keybinding section with an `explain` binding
+  example and `herdr plugin action invoke explain`; added `explain` to the
+  yield-points section as explicitly not a yield point; added the
+  workspace-locality tier to "How the next pane is picked" (item 4) plus a
+  paragraph on why cascades beat weighted scores (predictability); added a
+  new "Why did it send me there? (`explain`)" section; added an `explain`
+  line to Troubleshooting; added a note to "State storage" about the
+  `explain.json` sibling artifact.
+- **Correction caught during drafting**: my first pass claimed `explain`
+  "never writes state" / "nothing here is persisted" — false. Reading
+  `_explain_write_artifact()` showed it writes a best-effort
+  `$STATE_DIR/explain.json` (700/600 perms, atomic tmp+mv, same pattern as
+  `state.json`) purely for machine-readable introspection; `schedule()`
+  never reads it back, so it can't affect a real decision, but it is not
+  literally state-free. Corrected all three locations (prd.md §6.1,
+  README's yield-points note, README's explain section, README's State
+  storage note) to say "never touches the real state.json or its lock /
+  never calls agent focus" instead of "writes no state," and added the
+  explain.json detail explicitly.
+- `CHANGELOG.md`: added a `## 1.1.0` entry (workspace-locality tier,
+  `explain` action including the `explain.json` artifact caveat, A-0
+  suppression-threshold/prune stderr logging framed as a deliberate
+  evidence-gathering decision ahead of demotion decay/issue #3 rather than
+  an omission) and a `### Changed` note for the prd.md §6.4 predictability
+  clarification. Used Fenster/Keaton's version `1.1.0`, already matching
+  `herdr-plugin.toml` — no mismatch to flag.
+- Did NOT document anywhere: the keyword transition hold (item C), full
+  demotion decay (issue #3), or the weighted/profile scoring model
+  (B-full) — all confirmed absent from the shipped code by direct reading,
+  all deliberately deferred per the design doc's gates.
+
+No code/doc mismatches found this cycle beyond the one I caught and fixed
+myself in drafting (the `explain.json` write). `tests/README.md`'s new
+v1.1 section (read, not edited — out of scope) independently corroborates
+`explain` never calling `agent focus` under any input, consistent with
+what I documented.

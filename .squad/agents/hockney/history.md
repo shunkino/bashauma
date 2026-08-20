@@ -144,3 +144,92 @@ decided by Hockney.
 - **Verdict: APPROVED WITH NITS.** Both prior blockers genuinely closed;
   the residual restart-reset uncertainty is well-evidenced, honestly
   disclosed, and fails safe. Release proceeded at 1.0.1.
+
+## v1.1: `explain` action, A-0 suppression logging, B-lite workspace-locality tier
+
+- Wrote proactive tests from `.squad/design/v1.1-scheduling.md` before
+  viewing Fenster's implementation: `explain_action.sh` (never focuses;
+  winner matches real cascade in a non-obvious false-claim-demotion
+  scenario), `a0_suppression_logging.sh` (threshold-crossing log,
+  close-prune log, no spurious firing), `b_lite_workspace_locality.sh`
+  (no-op under default affinity, effect under `affinity=none`, never
+  overrides P0/aging, §6.4 determinism). Extended `nongoal_guard.sh` and
+  `harness.sh` (`BASHAUMA_EXPLAIN_CMD` indirection) to match.
+- Corrected my own initial (wrong) assumption about `explain`'s output
+  contract once the real code appeared mid-session: real contract is a
+  stdout `<-- WINNER` marker line, not a JSON file — though Fenster later
+  also added `$STATE_DIR/explain.json` (700/600 perms, atomic tmp+mv),
+  which I manually verified is written correctly and matches the docs.
+- Found and pinned a real MAJOR defect during the review pass:
+  `_demote_pane_to_p1`'s A-0 stderr threshold-crossing log fires
+  unconditionally even when called from read-only `explain_decision()`,
+  which never persists state — so a bare `explain` call can emit a false
+  "crossed suppression threshold" log line, repeatably, for a demotion
+  that never actually happened. This directly undermines A-0's stated
+  purpose (gathering trustworthy evidence to gate issue #3's decay work).
+  Added `tests/cases/a0_suppression_logging.sh` Scenario D to pin it
+  (fails by design against current code).
+- Re-verified §9 (single `agent focus` call site, unreachable from
+  `explain`), `explain`'s shared-cascade-code guarantee (`_classify_candidate`/
+  `_resolve_confirm` genuinely shared, not duplicated), B-lite's tier
+  boundaries and no-op-under-default-affinity proof, full 16-case
+  pre-v1.1 regression sweep, and version/CHANGELOG consistency (1.1.0) —
+  all clean. Read Fenster's and Verbal's inbox reports; both independently
+  confirmed the `explain.json` doc/code sync but neither caught the
+  log-pollution defect.
+- Suite: 19 case files, 18 passing, 1 known/expected failure (the new
+  regression test proving the defect).
+- **Verdict: APPROVED WITH NITS.** The MAJOR finding is diagnostic-only
+  (no §9/state/behavior impact) so does not block release; recommended as
+  a fast-follow fix by Fenster (not locked out — this is an approval, not
+  a rejection) rather than a formal reject-and-reassign cycle. Nit: harness
+  doesn't yet assert on `explain.json` directly (stdout contract already
+  covers winner correctness).
+
+## Follow-up: correcting the a0_suppression_logging.sh Scenario D needle (stream separation)
+
+- Fenster's `log_enabled` threading through `_demote_pane_to_p1`/
+  `_classify_candidate` (`schedule()` passes `"true"`, `explain_decision()`
+  passes `"false"`) is the correct fix for my prior MAJOR finding, and
+  keeps the shared-cascade guarantee intact — no forked classifier.
+- But my own Scenario D needle (`assert_not_contains "$HARNESS_LAST_OUTPUT"
+  "suppress"` against a fused stdout+stderr stream) was too broad: it
+  couldn't distinguish `explain`'s legitimate stdout mention of
+  suppression (the `p0_suppress_after_demotions` config key, a
+  per-candidate `suppressed=` field — correct, useful, exactly its job)
+  from A-0's real threshold-crossing log actually firing on stderr. This
+  drove Fenster into relabeling the report's fields
+  (`p0_supp_after_demotions=`/`p0_capped=`) to dodge the substring — a
+  bad fix that would have left `explain` naming a config key that doesn't
+  exist in `config.json`, a real usability regression in the tool whose
+  whole job is telling users which knob to turn.
+- Fixed by separating streams in the harness: added
+  `_harness_run_captured` (one invocation, two temp files) to
+  `tests/lib/harness.sh`, giving every `invoke_*` call
+  `HARNESS_LAST_STDOUT`/`HARNESS_LAST_STDERR` alongside the still-present,
+  unchanged-in-meaning `HARNESS_LAST_OUTPUT` (kept for backward
+  compatibility — verified no existing case depends on stream identity or
+  ordering, only substring presence). Rewrote all four
+  `a0_suppression_logging.sh` scenarios to assert against
+  `HARNESS_LAST_STDERR` with the log line's distinctive shape ("crossed
+  P0 suppression threshold" / "pruned on close"), not a bare keyword —
+  applied the same precise convention to A and B for consistency, not
+  just the two that broke. Documented the new variables and this exact
+  incident in `tests/README.md` as the reason to prefer them going
+  forward. Also corrected a now-stale harness comment claiming
+  `explain_decision()` never persists an `explain.json` (Fenster added
+  `_explain_write_artifact()` after that comment was written).
+- **Verified empirically, not assumed**: forced `log_enabled` to always
+  `"true"` in a scratch copy of the repo (simulating the pre-fix
+  behavior) and confirmed the corrected Scenario D fails — exactly one
+  assertion, the right one — then deleted the scratch copy. Confirmed it
+  passes against the current (still relabeled-fields) code for the right
+  reason: the `log_enabled` threading, not the field relabeling.
+- Suite: 19/19, stable across 3 consecutive full runs. `bash -n` clean;
+  `shellcheck -x` shows only pre-existing, unrelated warnings.
+- Findings and the precise restoration Fenster needs
+  (`p0_supp_after_demotions=` → `p0_suppress_after_demotions=`,
+  `p0_capped=` → `suppressed=`, drop the now-obsolete "never say
+  suppress" comment) written to
+  `.squad/decisions/inbox/hockney-a0-log-needle-stream-separation.md`.
+  Not a full re-review verdict — narrow follow-up on one test's needle.

@@ -45,11 +45,45 @@ test drives the scheduler through two overridable indirection points
 | --- | --- | --- |
 | `BASHAUMA_SCHEDULER_CMD` | `on_status_changed.sh` | dispatch yield (`pane.agent_status_changed`), prd.md §6.1 |
 | `BASHAUMA_NEXT_CMD` | `next.sh` | explicit yield (the `next` action), prd.md §6.1 |
+| `BASHAUMA_EXPLAIN_CMD` | `explain.sh` | the v1.1 `explain` action (design: `.squad/design/v1.1-scheduling.md`) — **NOT a yield point** |
+
+`explain`'s output is a plain human-readable stdout report
+(`_print_explain_report()` in `lib/scheduler.sh`), with the winning
+candidate's line ending in the literal marker `<-- WINNER` — parsed by
+`explain_winner_pane_id()` in `tests/lib/harness.sh`. If that report
+format ever changes, only `explain_winner_pane_id()` needs updating; the
+intent of each check should not need to change.
 
 If the real implementation uses different file names, either rename the
 files to match, or export the variables (e.g. in CI, or ad-hoc on the
 command line) to point at the real entrypoints. Nothing else needs to
 change.
+
+### Asserting on output: `HARNESS_LAST_STDOUT` / `HARNESS_LAST_STDERR` / `HARNESS_LAST_OUTPUT`
+
+Every `invoke_status_changed` / `invoke_next` / `invoke_explain` call sets
+three variables (`tests/lib/harness.sh`'s `_harness_run_captured`):
+
+- `HARNESS_LAST_STDOUT` — stdout only.
+- `HARNESS_LAST_STDERR` — stderr only.
+- `HARNESS_LAST_OUTPUT` — both concatenated (stdout first), kept for
+  older tests that only ever assert substring *presence*, not which
+  stream a message landed on.
+
+**Prefer the split variables for any new assertion**, and be specific
+about which stream you actually mean. A-0's real diagnostic log lines
+(`_demote_pane_to_p1`'s threshold-crossing log, `schedule()`'s
+close-prune log) are stderr-only by design — assert against
+`HARNESS_LAST_STDERR` when checking for them, not the fused
+`HARNESS_LAST_OUTPUT`. This isn't cosmetic: `explain`'s legitimate stdout
+report discusses suppression by name (the `p0_suppress_after_demotions`
+config key, a per-candidate `suppressed=` field) as part of its normal,
+correct job, and a bare keyword check against the fused stream can't tell
+that apart from A-0's real log line actually firing —
+`tests/cases/a0_suppression_logging.sh` hit exactly this
+(2026-08-20 Hockney review follow-up) and had to be corrected to check
+`HARNESS_LAST_STDERR` for the log line's distinctive text, not
+`HARNESS_LAST_OUTPUT` for a bare "suppress" substring.
 
 A few individual cases (`6_4_affinity_aging_fifo_falseclaim.sh`,
 `6_8_config.sh`) also assume specific *config* wiring (e.g.
@@ -169,3 +203,39 @@ expected to fail until fixed):
 - `regression_fractional_aging_seconds.sh` — a fractional (but PRD-legal)
   `aging_seconds`/`BASHAUMA_AGING_SECONDS` crashes `schedule()`'s bash
   integer arithmetic and silently drops the yield.
+- `regression_id_recycle_suppression.sh` — a pane_id recycled after a herdr
+  server restart must not silently inherit a stale P0 suppression record
+  from the previous, now-gone agent that used to hold that ID.
+- `regression_suppression_survives_lineage_check.sh` — the recycled-ID
+  lineage-verification fix (`_lineage_trusted`/`_forget_stale_pane`) must
+  not itself disable suppression for a genuinely continuous pane: ordinary,
+  always-forward `state_change_seq` movement during real operation must
+  never be mistaken for evidence of a different pane.
+- `regression_close_reopen_pruning.sh` — suppression/demotion bookkeeping
+  is pruned when a pane closes, while other panes' entries survive.
+- `regression_config_warning.sh` — `_config_to_int` warns to stderr (exact
+  message text) on outright-invalid config values, and stays silent for
+  valid-but-fractional truncation.
+
+## v1.1 (design: `.squad/design/v1.1-scheduling.md`)
+
+> 📌 Written PROACTIVELY, ahead of Fenster's implementation of the same
+> three items — see each file's header comment for the design section it
+> targets and any output-contract assumptions it had to make.
+
+- `explain_action.sh` — the new `explain` action: must never call `agent
+  focus` under any input (empty queue, all-blocked, `agent list` failure —
+  it is explicitly NOT a yield point), and must report exactly the same
+  winner `next` actually picks for identical, non-obvious queue state
+  (guards against a duplicated/stale copy of the pick-next cascade drifting
+  from the real one).
+- `a0_suppression_logging.sh` — A-0: logs every suppression-threshold
+  crossing and every suppressed-pane close-prune, and — just as
+  important — does NOT fire on ordinary operation with no such event (a
+  log that cries wolf is useless as the evidence it exists to gather).
+- `b_lite_workspace_locality.sh` — B-lite: the new workspace-locality
+  lexicographic tier (`aged_rank, class_rank, affinity_rank,
+  workspace_locality_rank, seq, pane_id`) is a no-op under default (`tab`)
+  affinity, has an effect only with `affinity=none`, never overrides a
+  confirmed P0 pane, never overrides aging promotion (the starvation
+  guarantee), and keeps the pick deterministic for identical queue state.

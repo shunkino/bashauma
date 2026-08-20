@@ -1,6 +1,6 @@
 id = "bashauma"
 name = "bashauma"
-version = "1.0.1"
+version = "1.1.0"
 min_herdr_version = "0.8.0"
 description = "A non-preemptive scheduler for your attention across open agent panes"
 platforms = ["linux", "macos"]
@@ -14,6 +14,13 @@ id = "next"
 title = "bashauma: next"
 description = "Yield to the scheduler — move focus to the highest-priority runnable pane"
 command = ["./next.sh"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "explain"
+title = "bashauma: explain"
+description = "Read-only: show why the scheduler would pick what it picks right now (never moves focus)"
+command = ["./explain.sh"]
 platforms = ["linux", "macos"]
 
 [[panes]]

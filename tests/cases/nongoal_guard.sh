@@ -41,10 +41,19 @@ assert_eq "$found_notification" "" "no shipped script may invoke 'herdr notifica
 
 # --- agent focus is confined to files that implement a yield point --------
 # winner_screen.sh renders the celebration popup only; it must never itself
-# call `agent focus`.
-if [ -f "$REPO_ROOT/winner_screen.sh" ]; then
-    winner_focus_calls=$(grep -c "agent focus" "$REPO_ROOT/winner_screen.sh" || true)
-    assert_eq "$winner_focus_calls" "0" "winner_screen.sh (the celebration popup) must never call agent focus"
-fi
+# call `agent focus`. explain.sh (v1.1) is a read-only decision report,
+# explicitly NOT a yield point, and must never call it either. Excludes
+# comment lines (`grep -v '^\s*#'`) so a file's own doc-comments explaining
+# that it does NOT call agent focus (e.g. explain.sh's header, which
+# literally contains the string for exactly that reason) don't trip a
+# false positive here -- the runtime half is covered behaviorally by
+# 6_5_non_dispatch_no_focus.sh and explain_action.sh regardless, so this
+# check only needs to catch a real, live invocation.
+for guarded_file in winner_screen.sh explain.sh; do
+    if [ -f "$REPO_ROOT/$guarded_file" ]; then
+        live_focus_calls=$(grep -v '^[[:space:]]*#' "$REPO_ROOT/$guarded_file" | grep -c "agent focus" || true)
+        assert_eq "$live_focus_calls" "0" "$guarded_file must never call agent focus (outside of its own doc-comments)"
+    fi
+done
 
 harness_report_and_exit

@@ -2,6 +2,49 @@
 
 All notable changes to `bashauma` are documented here.
 
+## 1.1.0
+
+A scheduling refinement (workspace-locality tiebreak), a new diagnostic
+action (`explain`), a spec clarification in `prd.md`, and one deliberate
+non-fix: no new config keys.
+
+### Added
+
+- **Workspace-locality tiebreak.** A new, fifth lexicographic tier in the
+  pick-next cascade (`aged`, `class`, `affinity`, **workspace locality**,
+  `state_change_seq`): when candidates are still tied after class, aging,
+  and affinity, prefer whichever shares the departing pane's
+  `workspace_id`. It is a hard gate, not a weight — it can only break ties
+  among candidates that already survived every earlier rule, so it can
+  never let locality outrank class or aging.
+- **`explain` action.** A new read-only `[[actions]]` entry
+  (`herdr plugin action invoke explain`, or bind it yourself — see
+  `README.md`) that reports the full ranked candidate list the scheduler
+  would use right now, using the identical classification code path as a
+  real yield, so the explanation can never drift from the real decision.
+  It never calls `agent focus` and never touches the real `state.json` or
+  its lock — safe to run at any time, as often as you like. It does write
+  a best-effort sibling file, `explain.json`, so the same report is
+  available machine-readably; `schedule()` never reads that file back, so
+  it cannot feed into a real decision.
+- Diagnostic stderr logging (`herdr plugin log list --plugin bashauma`)
+  whenever a pane first crosses the `p0_suppress_after_demotions`
+  threshold, and whenever a suppressed pane's record is pruned on close.
+  This is deliberately *not* paired with a decay mechanism this release:
+  demotion decay (tracked as issue #3) has not shipped, on purpose — no
+  suppression event has yet been observed in real use, and shipping decay
+  logic against a signal nobody has watched fire would be guessing. This
+  logging exists to gather that evidence before anything is built against
+  it.
+
+### Changed
+
+- `prd.md` §6.4 now states the actual requirement explicitly:
+  predictability, not mere reproducibility. The two are different
+  properties, and a weighted score can satisfy the latter while failing
+  the former; the lexicographic cascade above is a direct consequence of
+  requiring the latter.
+
 ## 1.0.1
 
 Two v1.0.0 review follow-ups (GitHub issues #1, #2), both bug fixes to

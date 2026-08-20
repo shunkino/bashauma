@@ -91,24 +91,30 @@ scheduling entry points, but **only one of them can be triggered automatically**
    finished reading a diff, answered a question, or just want to move on.
 
 Herdr plugin manifests have no `[[keybindings]]` table — plugins cannot ship
-key bindings for their own actions. You have to bind `next` yourself, in your
-own `~/.config/herdr/config.toml`:
+key bindings for their own actions. You have to bind `next` (and, if you want
+it, `explain` — see below) yourself, in your own `~/.config/herdr/config.toml`:
 
 ```toml
 [[keys.command]]
 key = "prefix+n"
 type = "plugin_action"
 action_id = "next"
+
+[[keys.command]]
+key = "prefix+shift+n"
+type = "plugin_action"
+action_id = "explain"
 ```
 
-(Add `plugin_id = "bashauma"` if you have another plugin with a conflicting
-`next` action id.) Pick whatever key suits your muscle memory — `prefix+n` is
-just a suggestion.
+(Add `plugin_id = "bashauma"` to either block if you have another plugin with
+a conflicting action id.) Pick whatever keys suit your muscle memory —
+these are just suggestions.
 
-To test the action without binding a key at all:
+To test either action without binding a key at all:
 
 ```sh
 herdr plugin action invoke next
+herdr plugin action invoke explain
 ```
 
 ## Yield points, in full
@@ -123,6 +129,10 @@ Dispatch detection is debounced (~1.5s, `BASHAUMA_DEBOUNCE_SECONDS`) and
 re-verified with `agent get` before being trusted, to filter out agents (e.g.
 Copilot CLI opening/closing its "tasks" sub-view) that briefly flip status
 and flip back with no real dispatch behind it.
+
+A third action, `explain`, is **not** a yield point — invoking it never moves
+focus and never touches the real scheduling state. See "Why did it send me
+*there*?" below.
 
 ## How the next pane is picked
 
@@ -140,10 +150,25 @@ it:
 3. **Aging across classes.** A P1 candidate that's waited past `aging_seconds`
    jumps ahead of P0, so a chatty agent that keeps triggering blocked prompts
    can't starve everything else.
-4. **FIFO within ties**, by `state_change_seq` — deterministic, so you can
+4. **Workspace locality among ties.** If everything above is still tied — in
+   practice this only ever matters among untied P1 candidates, since P0 or
+   an aged candidate has already won by this point — prefer whichever
+   candidate shares the workspace you're leaving from. This is a hard gate,
+   not a weighted score: it can only ever break a tie among candidates that
+   already survived every earlier rule, so it can never let locality beat
+   class or aging.
+5. **FIFO within ties**, by `state_change_seq` — deterministic, so you can
    build intuition about where you'll land.
-5. Nothing runnable → the epoch has drained → 🎉 winner screen, and the epoch
+6. Nothing runnable → the epoch has drained → 🎉 winner screen, and the epoch
    resets.
+
+Every one of those is a hard gate evaluated strictly in order — never a
+weighted score. That's deliberate: a score that blends several signals into
+one number is just as reproducible as a cascade (the same inputs always
+produce the same output), but it isn't *predictable* — you'd have to run the
+math to know where you'll land, which defeats the entire point of "next" being
+something you can trust without thinking about. A cascade lets you check one
+rule at a time and stop at the first one that isn't tied.
 
 **"Blocked" is a candidate, not a verdict.** Herdr's own `blocked` detection
 can be noisy per agent (see [`prd.md` §14](./prd.md#14-appendix-measurement-of-the-blocked-signal)
@@ -167,6 +192,33 @@ stranger's distrust. In practice this means: a pane that keeps falsely
 claiming P0 stays suppressed for as long as it's genuinely the same live
 agent, but you're never permanently and silently denied P0 by an agent
 that merely reused an old pane's ID.
+
+## Why did it send me *there*? (`explain`)
+
+`next` and dispatch are silent by design (that's the whole point of not
+narrating every decision), but silence has a cost: sometimes you land
+somewhere and can't tell why. `explain` answers exactly that, without
+guessing and without moving anything:
+
+```sh
+herdr plugin action invoke explain
+```
+
+It runs the same classification the real scheduler would use for your
+current pane — the identical code path, not a second copy that could drift
+out of sync — and prints every runnable candidate ranked by the real cascade
+(aged, class, affinity, workspace locality, sequence, pane ID), with the
+would-be winner marked. For each candidate you get its class (P0/P1), whether
+it's aged, its affinity and workspace-locality rank, its raw
+`state_change_seq`, and its suppression/demotion state. It never calls
+`agent focus` and never touches the real `state.json` or its lock, so it
+can't move you or affect a later real decision — you can run it as many
+times as you want, mid-thought, with zero effect on the actual queue. (It
+does write a best-effort `explain.json` next to the real state file, purely
+so the same report is available machine-readably; `schedule()` never reads
+that file back, so it has no way to feed into a real decision.) It's the
+answer to "why did it send me *there*?", and arguably the most useful single
+command in this plugin.
 
 ## Configuration
 
@@ -252,6 +304,11 @@ its lock directory are created `chmod 700`, and `state.json` itself is
 written `chmod 600` — the file only holds pane IDs and internal scheduling
 bookkeeping (no secrets), but it's owner-only regardless.
 
+Running `explain` (see above) additionally writes a sibling file,
+`explain.json`, in the same directory with the same permissions — a
+best-effort, machine-readable copy of its report. It's diagnostic only:
+`schedule()` never reads it, so it can't affect a real decision.
+
 ## Migrating from v0.1
 
 v1 removes v0.1's "finish-focus" behavior and its viewport-diffing activity
@@ -298,6 +355,10 @@ script it and add new cases. Passing green is a reasonable release gate.
   without it. Check `herdr plugin log list` for what actually ran.
 - **`next` does nothing.** Confirm you've bound a key (see above), or test the
   action directly with `herdr plugin action invoke next`.
+- **I don't understand why I landed on this pane.** Run
+  `herdr plugin action invoke explain` — it reports the full ranked
+  candidate list for the pane you're on, using the same logic the real
+  scheduler used, with no side effects.
 - **Focus never moves.** `bashauma` only tracks panes `herdr agent list`
   reports as agents; plain shell panes are ignored.
 - **The winner screen won't fire.** It fires at most once per epoch, and only

@@ -103,6 +103,15 @@ Exactly two events cause bashauma to schedule:
 No other event schedules. Agent status changes that are not a dispatch update
 the queue silently.
 
+A third action, `explain`, reports what the cascade below would currently
+pick and why, using the exact same classification logic as a real yield —
+but it is not itself a yield point: it never calls `agent focus` and never
+touches the real scheduling `state.json` or its lock (it does write a
+best-effort, machine-readable sibling file, `explain.json`, purely for
+introspection — `schedule()` never reads it back, so it cannot influence a
+real decision). It exists to answer "why did it send me there?" without
+requiring the user to simulate the algorithm from memory.
+
 ### 6.2 Ready queue and priority classes
 
 At every yield, bashauma builds the runnable set from `agent list` and
@@ -172,9 +181,16 @@ At a yield point, choose the next pane by:
 3. **Aging across classes.** A P1 candidate whose wait exceeds
    `aging_seconds` is promoted above P0 so review/dispatch work cannot be
    starved by a chatty agent that keeps blocking.
-4. **FIFO within ties**, ordered by `state_change_seq` from `agent list`
+4. **Workspace locality among ties.** When nothing else above has decided —
+   in practice, this only ever matters among P1 candidates, since P0 or an
+   aged candidate would already have won — prefer whichever candidate shares
+   the departure pane's `workspace_id`. This is a fifth, purely lexicographic
+   gate, not a weighted signal: it can only break a tie among candidates
+   that already survived every earlier tier, so it never lets locality
+   outrank class or aging.
+5. **FIFO within ties**, ordered by `state_change_seq` from `agent list`
    (already exposed; no extra bookkeeping needed).
-5. If the runnable set is empty → idle → winner screen and epoch reset.
+6. If the runnable set is empty → idle → winner screen and epoch reset.
 
 **False-claim demotion.** If the user is sent to a P0 pane and leaves it
 without dispatching, the P0 claim was wrong (stale prompt text, an
@@ -185,8 +201,16 @@ clears the record. This is the multi-level-feedback-queue idea from §12
 applied as a safety net: the scheduler learns to distrust a noisy signal
 instead of relying on the signal being correct.
 
-Determinism matters: given the same queue state, the choice must be
-reproducible, so the user can build intuition about where they will land.
+**Predictability, not mere reproducibility, is the requirement.** These are
+different properties: reproducibility means identical inputs yield identical
+output; predictability means the user can anticipate the result from memory,
+without simulating the algorithm. A reproducible scoring function can still
+be unpredictable — every signal can influence every decision by an amount
+invisible from the terminal. This is why the pick-next policy above is a
+lexicographic cascade of hard tiers, evaluated strictly in order, rather than
+a weighted score: each tier is a gate a human can check in sequence and stop
+at the first one that isn't tied, which is what actually lets them build
+intuition about where they will land.
 
 ### 6.5 What happens on a status change that is not a dispatch
 
@@ -240,8 +264,8 @@ All existing; no Herdr core changes required.
   `tab_id`, `workspace_id`, `cwd`, `focused` for classification and affinity.
 - `agent get` — debounce re-verification.
 - `agent focus` — the context switch.
-- `[[actions]]` — declares the `next` action; the explicit yield's key
-  binding is user-side config, not a plugin capability.
+- `[[actions]]` — declares the `next` and `explain` actions; key binding
+  for either is user-side config, not a plugin capability.
 - `plugin.pane.open` with `placement = "popup"` — winner screen.
 - `HERDR_PLUGIN_STATE_DIR`, `HERDR_BIN_PATH` — state and portable CLI access.
 

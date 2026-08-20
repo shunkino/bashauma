@@ -150,3 +150,155 @@ close-pruning logic for this cycle.
   reasoning, live-herdr findings, and explicit non-resolution of issue
   #3, for Hockney/Rai/Verbal.
 - Did not edit `tests/`, `README.md`, `CHANGELOG.md`, or `prd.md`.
+
+## Session: design-only proposal for issue #3 decay, weighted priority model, keyword hold (2026-08-19T22:29:20+09:00)
+
+- Task: design (no implementation) for three related requests from Shun --
+  issue #3 (`demotion_count` decay), a richer/dynamic priority model
+  (agent-human data locality, mining the OS analogy per prd.md §12), and a
+  keyword-based transition hold (departure-pane guide text vetoes the
+  automatic dispatch-yield move) -- delivered as one coherent design, not
+  three bolt-ons. Fact Checker separately stress-testing the premise in
+  parallel.
+- Read `gh issue view 3` in full, `prd.md` end to end, and `lib/scheduler.sh`
+  (568 lines) + `lib/config.sh` in full before designing, to ground every
+  recommendation in the actually-shipped v1.0.1 mechanics rather than
+  prd.md's higher-level prose.
+- **Issue #3:** recommended time decay (lazy, window-based decrement of
+  `demotion_count`, new `last_demotion_at` map, new
+  `demotion_decay_seconds` config default 900s), deriving `is_suppressed`
+  from the counter instead of maintaining a separate
+  `p0_suppressed_pane_ids` array (removed -- decay would otherwise need two
+  synchronized sources of truth). Rejected the issue's own favored option
+  (success-based reset) after tracing the code and confirming suppressed/
+  demoted panes are classified P1 directly and never call `confirm_p0`
+  again -- the "free" signal the issue assumed exists for this case does
+  not exist. Threaded through issue #1's lineage check (`_forget_stale_pane`
+  must also wipe `last_demotion_at`).
+- **Priority model:** proposed a hybrid -- two hard bands (aged-P1 first,
+  for §9's starvation guarantee) stay fixed logic; everything else (P0 vs
+  non-aged P1, affinity/throughput/cheapness/staleness) becomes a weighted,
+  summed score with defaults chosen so ordering is provably identical to
+  today's cascade (zero-config preserved). New signals: continuous
+  affinity (replacing the discrete rank), a throughput EMA (MLFQ idea,
+  piggybacked on already-instrumented `record_status`/`schedule`
+  transitions, no new herdr calls), a cheapness/SJF proxy reusing the
+  existing P0-confirmation `pane read` at zero extra cost (line-count
+  heuristic), and staleness (weighted lowest by design, since aging already
+  owns starvation-freedom). Config surface: named profiles
+  (`classic`/`locality`/`throughput`/`custom`) over a raw `priority_weights`
+  object. Proposed a new `explain` action/manifest entry as the
+  inspectability answer to the determinism-vs-predictability distinction
+  the task insisted on.
+- **Keyword hold:** applies only to the dispatch yield, never the explicit
+  `next` yield (identified overriding an explicit user action as the
+  primary failure mode to avoid; this also makes `next` the escape hatch
+  for free). Checks the departure pane's own bottom-anchored text for
+  `hold_keywords` (empty by default -- judged a wrong default as worse than
+  none) via fixed-string, not regex, matching (plus an optional
+  `hold_pattern` override). A held pane still counts as fed; only the final
+  `agent focus` call and `last_winner_*` bookkeeping are skipped. Self-
+  correction reuses A's decay helper (generalized to a second map) and
+  issue #1's exact lineage pattern (`hold_seq`) rather than inventing a
+  parallel mechanism -- the concrete form of "one model, not three
+  bolt-ons" the task asked for. Argued explicitly (not assumed) that a hold
+  composes with §9's non-preemption invariant, since it produces no
+  `agent focus` call at all.
+- Delivered full pseudocode, state schema deltas (`last_demotion_at`,
+  removal of `p0_suppressed_pane_ids`, `hold_count`/`last_hold_at`/
+  `hold_seq`, throughput/staleness maps), config defaults and coercion
+  notes, risk assessment per item, and a recommended implementation order
+  (A -> C -> B, ~0.5 / ~1 / ~3-5 days) in-session to the requester.
+- Flagged prd.md revision scope per item: A = small (one §6.4 sentence),
+  B = major (§6.4 policy rewrite, §6.8 config table, §6.1/§7 new action,
+  §12 status update), C = moderate (§6.5 third case, §6.8 rows, §9
+  compatibility sentence) -- none of the three ships without touching the
+  spec of record except possibly A in isolation.
+- Wrote
+  `.squad/decisions/inbox/keaton-decay-priority-hold-design.md` for the
+  team.
+- No source files were created or modified (design-only task); did not
+  edit `tests/`, `README.md`, `CHANGELOG.md`, or `prd.md`.
+
+## Session: persist design + respond to Fact Checker's Devil's Advocate brief (2026-08-19T22:39:29+09:00)
+
+- Task: persist the full design proposal above (previously only in-session
+  context) to `.squad/design/v1.1-scheduling.md`, then read Fact Checker's
+  independent Devil's Advocate brief
+  (`.squad/decisions/inbox/fact-checker-devils-advocate-abc.md` +
+  `.squad/agents/fact-checker/history.md`) and respond to each objection
+  directly in a new section of that document, conceding where warranted
+  rather than defending the original design by default.
+- Wrote the complete, uncompressed proposal (model, config, pseudocode,
+  state schema deltas, risks, original order/prd.md scope for A/B/C) to
+  `.squad/design/v1.1-scheduling.md`.
+- Verified Fact Checker's key factual claim independently before
+  responding: `git show -s --format='%H %ci' 747db7e` confirms the
+  lineage/suppression fix landed 2026-08-19 22:14:48, ~15 minutes before
+  his brief was requested -- his "issue #3 is speculative, zero real
+  triggers" point checks out exactly as stated.
+- Conceded, point by point, in a new "Response to the Devil's Advocate
+  brief" section:
+  1. prd.md §6.4 conflates reproducibility with predictability -- agreed
+     this is the crux. Under `classic` default weights (as originally
+     specified, with strict tier separation) the score is provably
+     behaviorally identical to today's cascade, so predictability is
+     preserved *only* under that profile; any tuned profile genuinely
+     erodes it, and `explain` does not rescue that (post-hoc diagnostic,
+     not a pre-hoc guarantee) -- stated this plainly rather than let the
+     original design imply `explain` was a substitute.
+  2. Conceded to the narrower recommendation: ship Shun's literal stated
+     example (workspace-locality-when-idle) as one additional
+     lexicographic tier, not raw weights + named profiles. Specified the
+     exact revised cascade (`aged_rank, class_rank, affinity_rank,
+     workspace_locality_rank, seq, pane_id`).
+  3. Conceded C's original 3-strike raw hold-count self-correction
+     under-specified visibility for a single false hold (silent, unlike a
+     loud false P0) and didn't use as sharp a signal as false-claim
+     demotion's contradicting-user-action trigger. Redesigned: mandatory
+     stderr logging of every hold event (not just repeats, reusing the
+     existing config-warning log channel -- can't be a proactive
+     notification, §5 forbids that surface), and replaced the raw
+     3-strike counter with a `false_hold_count` incremented only when the
+     user presses `next` on the held pane within
+     `hold_quick_next_seconds` (new config, default 30) of the hold firing
+     -- direct evidence the hold was wrong, exempting after 1 occurrence
+     instead of 3. Held ground on one point: the needed §9 amendment
+     clarifies "move" vs. "suppressed move," it does not weaken the
+     invariant, and a literal time-based auto-expiry that later moves
+     focus on its own would itself violate §5 -- clarified this rather
+     than conceding a design flaw that isn't one.
+  4. Fully conceded issue #3 decay logic is premature given the verified
+     15-minute-old mechanism with zero real triggers. Replaced "build
+     decay now" with a near-zero-effort logging-only step (A-0): log every
+     suppression-threshold crossing and suppressed-pane close-prune, no
+     state/config/prd.md change, and gate full decay logic behind real
+     data from that log.
+  5. Conceded the complexity-budget critique of bundling A+B+C into one
+     cycle atop a ~12-hour-old scheduler; addressed by the revised,
+     heavily evidence-gated order rather than by argument.
+  6. Agreed `explain` must ship early, and extended the reasoning: the
+     need is triggered by A's decay (non-obvious, time-dependent state)
+     before B ships anything, not by B specifically -- moved `explain` to
+     the front of the revised order.
+- Revised implementation order: `explain` (minimal) -> A-0 (logging only)
+  -> B-lite (one added tier + prd.md amendment) -> C (hardened per above)
+  -> [gated, deferred] full demotion decay -> [gated, deferred] full
+  weighted/profile scoring model (B-full). Added a low-cost addition not
+  in Fact Checker's brief: log (don't act on) throughput-EMA/cheapness
+  telemetry now, at near-zero cost, so B-full's saturation constants are
+  evidence-based if/when its gate ever clears -- holding my own deferred
+  idea to the same evidentiary standard I applied to A.
+- Stated explicitly where I still hold a position rather than fully
+  converging: B-full should stay on record as a named, gated future
+  direction with concrete re-entry conditions, not be discarded outright
+  as an idea -- argued this is a narrow disagreement about whether a
+  deferred idea needs a written re-entry condition, not a disagreement
+  about risk acceptance, and is consistent with Fact Checker's own "none
+  of A/B/C is unreasonable to explore" framing.
+- Updated `.squad/decisions/inbox/keaton-decay-priority-hold-design.md`'s
+  summary to point at the persisted document and reflect the superseding
+  revised order/concessions, rather than leaving the original (now
+  partially retracted) summary as the team's only record.
+- No source files were created or modified (design-only task); did not
+  edit `tests/`, `README.md`, `CHANGELOG.md`, or `prd.md`.
