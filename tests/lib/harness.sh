@@ -85,11 +85,13 @@ export BASHAUMA_EXPLAIN_CMD="${BASHAUMA_EXPLAIN_CMD:-$REPO_ROOT/explain.sh}"
 if [ -t 1 ]; then
     C_RED=$'\033[31m'
     C_GREEN=$'\033[32m'
+    # shellcheck disable=SC2034 # Public color constant for case files that source this harness.
     C_YELLOW=$'\033[33m'
     C_RESET=$'\033[0m'
 else
     C_RED=""
     C_GREEN=""
+    # shellcheck disable=SC2034 # Public color constant for case files that source this harness.
     C_YELLOW=""
     C_RESET=""
 fi
