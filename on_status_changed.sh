@@ -75,4 +75,4 @@ fi
 
 record_status "$pane_id" "working"
 
-schedule "$pane_id"
+schedule "$pane_id" true

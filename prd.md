@@ -219,6 +219,13 @@ exits. In particular, `working → idle`, `working → done`, and
 `working → blocked` **do not move focus**. They only change which class the
 pane will fall into at the *next* yield.
 
+On a dispatch yield, an optional keyword transition hold may suppress the
+otherwise-normal focus move when the departure pane's bottom visible output
+matches configured hold text. The dispatch still records normal bookkeeping
+(including marking the departure pane fed) and logs the hold to stderr, but it
+does not call `agent focus`. The explicit `next` action bypasses this hold
+entirely.
+
 ### 6.6 Flicker filtering
 
 Some agents (e.g. GitHub Copilot CLI opening/closing its "tasks" sub-view)
@@ -247,13 +254,23 @@ All optional; defaults require no config.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `mode` | `on` | `on` \| `off` — `off` disables scheduling but keeps the `next` action |
+| `mode` | `on` | `on` \| `off` — `off` disables automatic dispatch scheduling but keeps the `next` action |
 | `aging_seconds` | `300` | Wait after which a P1 candidate is promoted above P0 |
 | `affinity` | `tab` | `tab` \| `workspace` \| `none` — how aggressively to prefer nearby panes |
 | `parked_panes` | `[]` | Panes excluded from the runnable set entirely (long-running background agents) |
 | `blocked_confirm_lines` | `5` | Bottom non-empty lines inspected when confirming a P0 candidate (§6.2) |
 | `blocked_confirm_pattern` | built-in | Override regex for the prompt-hint confirmation |
 | `blocked_confirm` | `true` | Set `false` to trust herdr's `blocked` verbatim (not recommended; see §14) |
+| `hold_keywords` | `[]` | Case-insensitive fixed-string keywords that hold the user on the departure pane after a dispatch yield |
+| `hold_pattern` | `""` | Optional ERE override for the dispatch-yield hold check |
+| `hold_check_lines` | `15` | Bottom non-empty departure-pane lines inspected for the hold check |
+| `hold_suppress_after` | `1` | False-hold overrides via immediate explicit `next` after which the pane becomes hold-exempt |
+
+Every key also has a `BASHAUMA_<KEY>` environment override (for example,
+`BASHAUMA_HOLD_KEYWORDS` as comma-separated fixed strings,
+`BASHAUMA_HOLD_PATTERN`, `BASHAUMA_HOLD_CHECK_LINES`, and
+`BASHAUMA_HOLD_SUPPRESS_AFTER`). The hold feature is inert until either
+`hold_keywords` or `hold_pattern` is configured.
 
 ## 7. API Dependencies
 
@@ -286,7 +303,9 @@ All existing; no Herdr core changes required.
 - **Utilization**: a higher fraction of open agents in `working` at any moment,
   compared to unassisted use.
 - **Zero unrequested context switches**: focus never moves except at a yield
-  point. This is a hard invariant, not a target.
+  point. This is a hard invariant, not a target. A dispatch move suppressed
+  by a keyword hold is not a context switch, and no focus move ever occurs
+  without a yield; the hold is strictly more conservative than v1's baseline.
 - **No starvation**: no runnable pane waits longer than `aging_seconds` past
   its turn.
 - **P0 precision**: a pane sent to the user as P0 is genuinely awaiting an
@@ -301,7 +320,8 @@ All existing; no Herdr core changes required.
   completes an epoch and still celebrates.
 - **All agents blocked** — every pane is P0; the queue is fully runnable and
   drains as the user answers. No deadlock is possible because the user is
-  always the one holding the lock.- **User dispatches to the same pane twice** — it is already fed; the scheduler
+  always the one holding the lock.
+- **User dispatches to the same pane twice** — it is already fed; the scheduler
   simply picks the next runnable pane.
 - **An agent that never needs tasks** (long-running watcher) — `parked_panes`
   keeps it out of the runnable set so it cannot hold an epoch open.
