@@ -45,7 +45,9 @@ This is the design thesis, not a missing-features list:
   notification plugin's job — `bashauma` only decides where focus goes next.
 - **No preemption, ever.** No "focus the agent that just finished," no timers
   that move focus, no interrupt-on-idle heuristics. An agent finishing its
-  work does not, by itself, move your cursor anywhere.
+  work does not, by itself, move your cursor anywhere. A keyword hold can
+  only suppress a dispatch-yield move; it never creates a new way to move
+  focus.
 - **No activity or typing heuristics.** Nothing diffs your pane's viewport to
   guess whether you're "busy." Under a non-preemptive design that machinery
   has no job to do.
@@ -193,6 +195,30 @@ claiming P0 stays suppressed for as long as it's genuinely the same live
 agent, but you're never permanently and silently denied P0 by an agent
 that merely reused an old pane's ID.
 
+## Staying put after a dispatch (`hold_keywords`)
+
+Some agents print a prompt that means "don't leave yet" right as they enter
+`working` — for example, a command confirmation. `bashauma` can be told to
+hold that dispatch yield, but only if you opt in by setting `hold_keywords`
+(or the power-user `hold_pattern`). With the default empty keyword list and
+empty pattern, this feature is inert and spends no extra departure-pane read.
+
+On a dispatch yield only, `bashauma` reads the departure pane's bottom
+`hold_check_lines` non-empty visible lines. If a `hold_keywords` entry matches
+there, the match is case-insensitive and fixed-string: regex punctuation in a
+keyword is literal. If `hold_pattern` is set, it is checked as an ERE override.
+A match does the most conservative thing possible: it records the dispatch,
+keeps you where you are, makes no `agent focus` call at all, and logs:
+
+```text
+bashauma: held pane <pane_id> on dispatch yield (matched <keyword|pattern>: "<value>")
+```
+
+The hold never applies to `next`. Pressing your bound `next` key immediately
+after a hold is the escape hatch and counts as a false-hold override for that
+pane; at the default `hold_suppress_after = 1`, the pane becomes hold-exempt
+for the same live pane lineage.
+
 ## Why did it send me *there*? (`explain`)
 
 `next` and dispatch are silent by design (that's the whole point of not
@@ -238,6 +264,10 @@ for a handful of scalar knobs isn't worth adding.
 | `blocked_confirm_pattern` | built-in `esc`/`enter` prompt-hint regex | Override regex for the prompt-hint confirmation. |
 | `blocked_confirm` | `true` | Set `false` to trust herdr's `blocked` verbatim (not recommended — see the §14 note above). |
 | `p0_suppress_after_demotions` | `3` | How many times a pane can falsely claim P0 before the scheduler stops trusting its `blocked` signal — for as long as it's provably the same live pane (see above). |
+| `hold_keywords` | `[]` | Case-insensitive fixed-string keywords that hold you on the departure pane after a dispatch yield. Empty by default, so the feature is inert until you opt in. |
+| `hold_pattern` | `""` | Optional ERE override for the dispatch-yield hold check. |
+| `hold_check_lines` | `15` | Bottom non-empty departure-pane lines inspected for the hold check. |
+| `hold_suppress_after` | `1` | Immediate `next` overrides after which the same live pane becomes hold-exempt. |
 
 Example `config.json`:
 
@@ -262,9 +292,14 @@ one-off tuning without touching the config file:
 | `BASHAUMA_BLOCKED_CONFIRM_PATTERN` | `blocked_confirm_pattern` |
 | `BASHAUMA_BLOCKED_CONFIRM` | `blocked_confirm` |
 | `BASHAUMA_P0_SUPPRESS_AFTER_DEMOTIONS` | `p0_suppress_after_demotions` |
+| `BASHAUMA_HOLD_KEYWORDS` | `hold_keywords` (comma-separated keywords) |
+| `BASHAUMA_HOLD_PATTERN` | `hold_pattern` |
+| `BASHAUMA_HOLD_CHECK_LINES` | `hold_check_lines` |
+| `BASHAUMA_HOLD_SUPPRESS_AFTER` | `hold_suppress_after` |
 
-`aging_seconds`, `blocked_confirm_lines`, and `p0_suppress_after_demotions`
-are the three numeric knobs the scheduler does integer arithmetic with. Each
+`aging_seconds`, `blocked_confirm_lines`, `p0_suppress_after_demotions`,
+`hold_check_lines`, and `hold_suppress_after` are the numeric knobs the
+scheduler does integer arithmetic with. Each
 is coerced rather than trusted verbatim, and the two failure modes are
 treated differently:
 
@@ -339,10 +374,11 @@ script it and add new cases. Passing green is a reasonable release gate.
 
 ## Troubleshooting
 
-- **My config isn't taking effect.** A config value that's outright invalid
-  (not just fractional) is rejected and replaced with its default, and
-  logs a one-line warning — but plugin-script stderr isn't printed to your
-  terminal, so you won't see it there. Read it with:
+- **My config isn't taking effect, or did a hold fire?** A config value
+  that's outright invalid (not just fractional) is rejected and replaced
+  with its default, and logs a one-line warning. Keyword holds also log
+  their exact matched keyword or pattern. Plugin-script stderr isn't
+  printed to your terminal, so read it with:
 
   ```sh
   herdr plugin log list --plugin bashauma

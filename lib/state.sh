@@ -31,6 +31,11 @@ STATE_DEFAULT_JSON='{
   "p0_suppressed_pane_ids": [],
   "demotion_count": {},
   "demotion_seq": {},
+  "hold_count": {},
+  "last_hold_at": {},
+  "hold_seq": {},
+  "false_hold_count": {},
+  "last_hold_pane_id": null,
   "winner_fired_epoch": false,
   "last_winner_pane_id": null,
   "last_winner_was_p0": false

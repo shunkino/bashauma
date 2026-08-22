@@ -35,4 +35,4 @@ fi
 
 [ -n "$departure_pane_id" ] || exit 0
 
-schedule "$departure_pane_id"
+schedule "$departure_pane_id" false

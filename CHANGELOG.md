@@ -2,6 +2,43 @@
 
 All notable changes to `bashauma` are documented here.
 
+## 1.2.0
+
+An opt-in keyword transition hold for dispatch yields. This is a minor
+release because it adds new scheduling configuration and observable
+diagnostics, but it is inert by default and does not change the v1.1.0
+contract unless you configure it.
+
+### Added
+
+- **Keyword transition hold.** New config keys `hold_keywords` (default
+  `[]`), `hold_pattern` (default `""`), `hold_check_lines` (default `15`),
+  and `hold_suppress_after` (default `1`) can keep you on the pane you just
+  dispatched from when its bottom visible output matches configured hold
+  text. The check runs only on a dispatch yield, reads the departure pane's
+  bottom `hold_check_lines` non-empty lines, and — when it matches — does
+  the null action: records normal dispatch bookkeeping, makes no
+  `agent focus` call at all, and logs this exact line to stderr for
+  `herdr plugin log list --plugin bashauma`:
+
+  ```text
+  bashauma: held pane <pane_id> on dispatch yield (matched <keyword|pattern>: "<value>")
+  ```
+
+  `hold_keywords` uses
+  case-insensitive fixed-string matching (`grep -Fqi -e`), so regex
+  metacharacters are literal; `hold_pattern` is the intentional ERE
+  power-user override. With the default empty keyword list and empty pattern,
+  the feature is fully inert and spends no extra departure-pane read. (#4)
+
+### Changed
+
+- The explicit `next` action now intentionally bypasses keyword transition
+  holds. Pressing `next` immediately after a held dispatch counts as one
+  false-hold override for that same pane lineage; at the default
+  `hold_suppress_after = 1`, that pane becomes hold-exempt so `next` remains
+  the escape hatch when a configured keyword is too broad. (#4)
+
 ## 1.1.0
 
 A scheduling refinement (workspace-locality tiebreak), a new diagnostic

@@ -29,13 +29,18 @@ CONFIG_DEFAULT_JSON='{
   "blocked_confirm_lines": 5,
   "blocked_confirm_pattern": "(esc to cancel|esc cancel).*(enter to (select|confirm|submit)|enter accept)|(enter to (select|confirm|submit)|enter accept).*(esc to cancel|esc cancel)",
   "blocked_confirm": true,
-  "p0_suppress_after_demotions": 3
+  "p0_suppress_after_demotions": 3,
+  "hold_keywords": [],
+  "hold_pattern": "",
+  "hold_check_lines": 15,
+  "hold_suppress_after": 1
 }'
 
 # _config_to_int <raw value> <fallback> [<key name>]
 # Coerces a config value that must reach bash's integer-only `$(( ))`
 # arithmetic (aging_seconds, blocked_confirm_lines,
-# p0_suppress_after_demotions) into a safe integer. prd.md does not
+# p0_suppress_after_demotions, hold_check_lines, hold_suppress_after)
+# into a safe integer. prd.md does not
 # constrain these to integers, and neither JSON config nor a BASHAUMA_*
 # env override is validated upstream, so this is the single choke point
 # that guarantees lib/scheduler.sh never hands `$(( ))` anything it can't
@@ -99,6 +104,10 @@ config_load() {
     CONFIG_BLOCKED_CONFIRM_PATTERN=$(printf '%s' "$merged" | jq -r '.blocked_confirm_pattern')
     CONFIG_BLOCKED_CONFIRM=$(printf '%s' "$merged" | jq -r '.blocked_confirm')
     CONFIG_P0_SUPPRESS_AFTER_DEMOTIONS=$(printf '%s' "$merged" | jq -r '.p0_suppress_after_demotions')
+    CONFIG_HOLD_KEYWORDS_JSON=$(printf '%s' "$merged" | jq -c '.hold_keywords')
+    CONFIG_HOLD_PATTERN=$(printf '%s' "$merged" | jq -r '.hold_pattern')
+    CONFIG_HOLD_CHECK_LINES=$(printf '%s' "$merged" | jq -r '.hold_check_lines')
+    CONFIG_HOLD_SUPPRESS_AFTER=$(printf '%s' "$merged" | jq -r '.hold_suppress_after')
 
     if [ -n "${BASHAUMA_MODE:-}" ]; then
         CONFIG_MODE="$BASHAUMA_MODE"
@@ -124,6 +133,18 @@ config_load() {
     if [ -n "${BASHAUMA_P0_SUPPRESS_AFTER_DEMOTIONS:-}" ]; then
         CONFIG_P0_SUPPRESS_AFTER_DEMOTIONS="$BASHAUMA_P0_SUPPRESS_AFTER_DEMOTIONS"
     fi
+    if [ -n "${BASHAUMA_HOLD_KEYWORDS:-}" ]; then
+        CONFIG_HOLD_KEYWORDS_JSON=$(printf '%s' "$BASHAUMA_HOLD_KEYWORDS" | jq -R -c 'split(",") | map(select(length > 0))')
+    fi
+    if [ -n "${BASHAUMA_HOLD_PATTERN:-}" ]; then
+        CONFIG_HOLD_PATTERN="$BASHAUMA_HOLD_PATTERN"
+    fi
+    if [ -n "${BASHAUMA_HOLD_CHECK_LINES:-}" ]; then
+        CONFIG_HOLD_CHECK_LINES="$BASHAUMA_HOLD_CHECK_LINES"
+    fi
+    if [ -n "${BASHAUMA_HOLD_SUPPRESS_AFTER:-}" ]; then
+        CONFIG_HOLD_SUPPRESS_AFTER="$BASHAUMA_HOLD_SUPPRESS_AFTER"
+    fi
 
     # Coerce every numeric knob that reaches bash `$(( ))` arithmetic
     # in lib/scheduler.sh, *after* config.json + env overrides have both
@@ -134,4 +155,6 @@ config_load() {
     CONFIG_AGING_SECONDS=$(_config_to_int "$CONFIG_AGING_SECONDS" 300 "aging_seconds")
     CONFIG_BLOCKED_CONFIRM_LINES=$(_config_to_int "$CONFIG_BLOCKED_CONFIRM_LINES" 5 "blocked_confirm_lines")
     CONFIG_P0_SUPPRESS_AFTER_DEMOTIONS=$(_config_to_int "$CONFIG_P0_SUPPRESS_AFTER_DEMOTIONS" 3 "p0_suppress_after_demotions")
+    CONFIG_HOLD_CHECK_LINES=$(_config_to_int "$CONFIG_HOLD_CHECK_LINES" 15 "hold_check_lines")
+    CONFIG_HOLD_SUPPRESS_AFTER=$(_config_to_int "$CONFIG_HOLD_SUPPRESS_AFTER" 1 "hold_suppress_after")
 }

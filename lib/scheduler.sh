@@ -5,7 +5,8 @@
 # yield), after lib/state.sh and lib/config.sh. Exposes:
 #
 #   record_status <pane_id> <status>  -- non-dispatch bookkeeping (§6.5)
-#   schedule <departure_pane_id>      -- the pick-next algorithm (§6.4)
+#   schedule <departure_pane_id> <is_dispatch_yield>
+#                                      -- the pick-next algorithm (§6.4)
 #
 # Both entrypoints must `trap state_release_lock EXIT` themselves so a
 # killed run cannot wedge the lock past its own process lifetime (beyond
@@ -77,6 +78,47 @@ confirm_p0() {
     text=$("$HERDR_CMD" pane read "$pane_id" --source visible 2>/dev/null) || return 1
     bottom=$(printf '%s\n' "$text" | awk 'NF' | tail -n "${CONFIG_BLOCKED_CONFIRM_LINES:-5}")
     printf '%s' "$bottom" | grep -Eqe "$CONFIG_BLOCKED_CONFIRM_PATTERN" 2>/dev/null
+}
+
+_hold_configured() {
+    local keyword_count
+    keyword_count=$(printf '%s' "${CONFIG_HOLD_KEYWORDS_JSON:-[]}" | jq 'length' 2>/dev/null || echo 0)
+    [ "$keyword_count" -gt 0 ] || [ -n "${CONFIG_HOLD_PATTERN:-}" ]
+}
+
+# _hold_match_departure <pane_id>
+# Reads the departure pane's visible output and checks only the bottom
+# CONFIG_HOLD_CHECK_LINES non-empty lines. Prints a JSON object:
+# {"matched":bool,"kind":"keyword|pattern","value":string|null}.
+_hold_match_departure() {
+    local pane_id="$1" text bottom kw
+    text=$("$HERDR_CMD" pane read "$pane_id" --source visible 2>/dev/null) || {
+        jq -n '{matched:false, kind:null, value:null}'
+        return 0
+    }
+    bottom=$(printf '%s\n' "$text" | awk 'NF' | tail -n "${CONFIG_HOLD_CHECK_LINES:-15}")
+
+    while IFS= read -r kw; do
+        [ -n "$kw" ] || continue
+        if printf '%s' "$bottom" | grep -Fqi -e "$kw" 2>/dev/null; then
+            jq -n --arg v "$kw" '{matched:true, kind:"keyword", value:$v}'
+            return 0
+        fi
+    done < <(printf '%s' "${CONFIG_HOLD_KEYWORDS_JSON:-[]}" | jq -r '.[]' 2>/dev/null)
+
+    if [ -n "${CONFIG_HOLD_PATTERN:-}" ] &&
+        printf '%s' "$bottom" | grep -Eqi -e "$CONFIG_HOLD_PATTERN" 2>/dev/null; then
+        jq -n --arg v "$CONFIG_HOLD_PATTERN" '{matched:true, kind:"pattern", value:$v}'
+        return 0
+    fi
+
+    jq -n '{matched:false, kind:null, value:null}'
+}
+
+_hold_log_line() {
+    local pane_id="$1" kind="$2" value="$3" value_json
+    value_json=$(jq -Rn --arg v "$value" '$v')
+    printf 'bashauma: held pane %s on dispatch yield (matched %s: %s)\n' "$pane_id" "$kind" "$value_json"
 }
 
 # _affinity_rank <tab> <ws> <cwd> <dep_tab> <dep_ws> <dep_cwd>
@@ -415,9 +457,9 @@ _demote_pane_to_p1() {
 # mistake here is silently starving a genuinely blocked, user-facing agent
 # forever (the bug this closes), not occasionally letting a pane re-earn
 # its demotion budget one extra time.
-_lineage_trusted() {
-    local in_state="$1" pane_id="$2" observed_seq="$3" recorded
-    recorded=$(printf '%s' "$in_state" | jq -r --arg p "$pane_id" '.demotion_seq[$p] // empty')
+_lineage_trusted_for_seq_map() {
+    local in_state="$1" seq_key="$2" pane_id="$3" observed_seq="$4" recorded
+    recorded=$(printf '%s' "$in_state" | jq -r --arg key "$seq_key" --arg p "$pane_id" '.[$key][$p] // empty')
     if [ -z "$recorded" ]; then
         echo "false"
         return
@@ -425,6 +467,14 @@ _lineage_trusted() {
     awk -v obs="$observed_seq" -v rec="$recorded" 'BEGIN {
         if ((obs + 0) >= (rec + 0)) { print "true" } else { print "false" }
     }'
+}
+
+_lineage_trusted() {
+    _lineage_trusted_for_seq_map "$1" "demotion_seq" "$2" "$3"
+}
+
+_hold_lineage_trusted() {
+    _lineage_trusted_for_seq_map "$1" "hold_seq" "$2" "$3"
 }
 
 # _forget_stale_pane <state json> <pane_id>
@@ -438,17 +488,61 @@ _forget_stale_pane() {
         .p0_suppressed_pane_ids = ((.p0_suppressed_pane_ids // []) | map(select(. != $p))) |
         .p0_demoted_pane_ids = ((.p0_demoted_pane_ids // []) | map(select(. != $p))) |
         .demotion_count = ((.demotion_count // {}) | with_entries(select(.key != $p))) |
-        .demotion_seq = ((.demotion_seq // {}) | with_entries(select(.key != $p)))
+        .demotion_seq = ((.demotion_seq // {}) | with_entries(select(.key != $p))) |
+        .hold_count = ((.hold_count // {}) | with_entries(select(.key != $p))) |
+        .last_hold_at = ((.last_hold_at // {}) | with_entries(select(.key != $p))) |
+        .hold_seq = ((.hold_seq // {}) | with_entries(select(.key != $p))) |
+        .false_hold_count = ((.false_hold_count // {}) | with_entries(select(.key != $p))) |
+        if .last_hold_pane_id == $p then .last_hold_pane_id = null else . end
     '
 }
 
-# schedule <departure_pane_id>
+_hold_is_exempt() {
+    local state="$1" pane_id="$2" observed_seq="$3" threshold false_count
+    threshold="${CONFIG_HOLD_SUPPRESS_AFTER:-1}"
+    if [ "$(_hold_lineage_trusted "$state" "$pane_id" "$observed_seq")" != "true" ]; then
+        echo "false"
+        return
+    fi
+    false_count=$(printf '%s' "$state" | jq -r --arg p "$pane_id" '.false_hold_count[$p] // 0')
+    if [ "$false_count" -ge "$threshold" ]; then
+        echo "true"
+    else
+        echo "false"
+    fi
+}
+
+_record_hold() {
+    local state="$1" pane_id="$2" now_ms="$3" observed_seq="$4"
+    printf '%s' "$state" | jq -c --arg p "$pane_id" --argjson now "$now_ms" --argjson seq "$observed_seq" '
+        .hold_count[$p] = ((.hold_count[$p] // 0) + 1) |
+        .last_hold_at[$p] = $now |
+        .hold_seq[$p] = $seq |
+        .last_hold_pane_id = $p
+    '
+}
+
+_record_false_hold_override_if_applicable() {
+    local state="$1" pane_id="$2" observed_seq="$3" last_hold
+    last_hold=$(printf '%s' "$state" | jq -r '.last_hold_pane_id // empty')
+    if [ "$last_hold" = "$pane_id" ] && [ "$(_hold_lineage_trusted "$state" "$pane_id" "$observed_seq")" = "true" ]; then
+        printf '%s' "$state" | jq -c --arg p "$pane_id" '
+            .false_hold_count[$p] = ((.false_hold_count[$p] // 0) + 1) |
+            .last_hold_pane_id = null
+        '
+    else
+        printf '%s' "$state" | jq -c '.last_hold_pane_id = null'
+    fi
+}
+
+# schedule <departure_pane_id> <is_dispatch_yield>
 # The pick-next algorithm (prd.md §6.2-§6.4).
 #
 # Locking strategy (regression: tests/cases/regression_lock_scope.sh --
 # BLOCKER #1 in Hockney's rejected review): all *external* herdr I/O
-# (`agent list`, and one `pane read` per blocked candidate needing a §6.2
-# confirmation) happens BEFORE the state lock is ever acquired. The lock
+# (`agent list`, the optional one departure-pane hold `pane read`, and one
+# `pane read` per blocked candidate needing a §6.2 confirmation) happens
+# BEFORE the state lock is ever acquired. The lock
 # is taken only around the local, fast, read-modify-write of state.json
 # (prune/demote/classify/pick/save), then released before the final
 # `agent focus` call. This keeps the lock's actual held duration bounded
@@ -461,16 +555,19 @@ _forget_stale_pane() {
 # against an unlocked *pre-lock snapshot* of state (safe to read without
 # the lock -- see lib/state.sh's state_load comment) purely to decide
 # which blocked candidates even need a confirmation read (already fed/
-# demoted/suppressed ones don't). That snapshot can be stale by the time
-# the real lock is held below, so every decision it fed is re-validated
-# against the authoritative, freshly-locked state: is_fed/is_suppressed/
-# is_demoted are re-checked from scratch in the candidate loop, and if a
-# blocked candidate needs a confirmation this schedule() call couldn't
-# have anticipated (not in the pre-lock cache), it is fetched directly at
-# that point as a rare fallback -- still correct, just not covered by the
-# lock-scope regression's happy path.
+# demoted/suppressed ones don't). The hold read is also pre-lock and is
+# skipped entirely unless this is a dispatch yield with non-empty hold
+# config, keeping the feature inert by default. That snapshot can be stale
+# by the time the real lock is held below, so every decision it fed is
+# re-validated against the authoritative, freshly-locked state:
+# is_fed/is_suppressed/is_demoted are re-checked from scratch in the
+# candidate loop, and if a blocked candidate needs a confirmation this
+# schedule() call couldn't have anticipated (not in the pre-lock cache),
+# it is fetched directly at that point as a rare fallback -- still
+# correct, just not covered by the lock-scope regression's happy path.
 schedule() {
     local departure_pane_id="$1"
+    local is_dispatch_yield="${2:-true}"
     local agents_json open_ids_json open_count state now_ms
 
     config_load
@@ -486,7 +583,12 @@ schedule() {
     open_ids_json=$(printf '%s' "$agents_json" | jq -c '[.[].pane_id]')
     open_count=$(printf '%s' "$open_ids_json" | jq 'length')
 
-    # --- Phase 2 (no lock): pre-fetch P0 confirmations ----------------------
+    # --- Phase 2 (no lock): pre-fetch slow pane reads -----------------------
+    local hold_match='{"matched":false,"kind":null,"value":null}'
+    if [ "$is_dispatch_yield" = "true" ] && _hold_configured; then
+        hold_match=$(_hold_match_departure "$departure_pane_id")
+    fi
+
     # Build a pane_id -> confirmed(true/false) map for every candidate that
     # (per this unlocked snapshot) looks like it will need one, so the
     # slow `pane read` round-trips happen before we ever take the lock.
@@ -589,7 +691,12 @@ schedule() {
         .p0_demoted_pane_ids = ((.p0_demoted_pane_ids // []) | map(select(. as $p | $open | index($p) != null))) |
         .p0_suppressed_pane_ids = ((.p0_suppressed_pane_ids // []) | map(select(. as $p | $open | index($p) != null))) |
         .demotion_count = ((.demotion_count // {}) | with_entries(select(.key as $k | $open | index($k) != null))) |
-        .demotion_seq = ((.demotion_seq // {}) | with_entries(select(.key as $k | $open | index($k) != null)))
+        .demotion_seq = ((.demotion_seq // {}) | with_entries(select(.key as $k | $open | index($k) != null))) |
+        .hold_count = ((.hold_count // {}) | with_entries(select(.key as $k | $open | index($k) != null))) |
+        .last_hold_at = ((.last_hold_at // {}) | with_entries(select(.key as $k | $open | index($k) != null))) |
+        .hold_seq = ((.hold_seq // {}) | with_entries(select(.key as $k | $open | index($k) != null))) |
+        .false_hold_count = ((.false_hold_count // {}) | with_entries(select(.key as $k | $open | index($k) != null))) |
+        if (.last_hold_pane_id // null) as $lh | ($lh != null and ($open | index($lh) == null)) then .last_hold_pane_id = null else . end
     ')
     # A-0: log every suppressed pane_id that this pass just pruned because
     # its pane closed. stderr, same channel/rationale as the
@@ -628,6 +735,34 @@ schedule() {
     if [ "$departure_status" = "working" ]; then
         state=$(printf '%s' "$state" | jq -c --arg p "$departure_pane_id" \
             '.epoch_fed_pane_ids = ((.epoch_fed_pane_ids // []) + [$p] | unique)')
+    fi
+
+    # --- keyword transition hold (dispatch yield only; explicit next bypasses)
+    local departure_seq hold_matched hold_kind hold_value hold_exempt hold_log
+    departure_seq=$(printf '%s' "$agents_json" | jq -r --arg p "$departure_pane_id" \
+        '[.[] | select(.pane_id == $p)][0].state_change_seq // 0')
+
+    if [ "$is_dispatch_yield" != "true" ]; then
+        state=$(_record_false_hold_override_if_applicable "$state" "$departure_pane_id" "$departure_seq")
+    fi
+
+    hold_matched=$(printf '%s' "$hold_match" | jq -r '.matched // false')
+    if [ "$is_dispatch_yield" = "true" ] && [ "$hold_matched" = "true" ]; then
+        if [ -n "$(printf '%s' "$state" | jq -r --arg p "$departure_pane_id" '.hold_seq[$p] // empty')" ] &&
+            [ "$(_hold_lineage_trusted "$state" "$departure_pane_id" "$departure_seq")" != "true" ]; then
+            state=$(_forget_stale_pane "$state" "$departure_pane_id")
+        fi
+        hold_exempt=$(_hold_is_exempt "$state" "$departure_pane_id" "$departure_seq")
+        if [ "$hold_exempt" != "true" ]; then
+            hold_kind=$(printf '%s' "$hold_match" | jq -r '.kind // "keyword"')
+            hold_value=$(printf '%s' "$hold_match" | jq -r '.value // ""')
+            hold_log=$(_hold_log_line "$departure_pane_id" "$hold_kind" "$hold_value")
+            state=$(_record_hold "$state" "$departure_pane_id" "$now_ms" "$departure_seq")
+            state_save "$state"
+            state_release_lock
+            printf '%s\n' "$hold_log" >&2
+            return 0
+        fi
     fi
 
     # --- departure affinity anchors -----------------------------------------
@@ -716,19 +851,21 @@ schedule() {
     return 0
 }
 
-# _print_explain_report <departure_pane_id> <dep_tab> <dep_ws> <dep_cwd> <ranked candidates json> <winner_pane_id>
+# _print_explain_report <departure_pane_id> <dep_tab> <dep_ws> <dep_cwd> <ranked candidates json> <winner_pane_id> <hold_report>
 # Pretty-prints explain_decision()'s ranked candidate list to stdout.
 # Pure formatting, no classification logic here -- everything it prints
 # was already decided by _classify_candidate/the sort_by in
 # explain_decision(), never recomputed independently.
 _print_explain_report() {
-    local departure_pane_id="$1" dep_tab="$2" dep_ws="$3" dep_cwd="$4" ranked="$5" winner_pane_id="$6"
+    local departure_pane_id="$1" dep_tab="$2" dep_ws="$3" dep_cwd="$4" ranked="$5" winner_pane_id="$6" hold_report="$7"
     local count
 
     printf 'bashauma explain -- departure pane: %s (tab=%s workspace=%s cwd=%s)\n' \
         "$departure_pane_id" "${dep_tab:-none}" "${dep_ws:-none}" "${dep_cwd:-none}"
-    printf 'config: affinity=%s aging_seconds=%s blocked_confirm=%s p0_suppress_after_demotions=%s\n\n' \
-        "$CONFIG_AFFINITY" "$CONFIG_AGING_SECONDS" "$CONFIG_BLOCKED_CONFIRM" "$CONFIG_P0_SUPPRESS_AFTER_DEMOTIONS"
+    printf 'config: affinity=%s aging_seconds=%s blocked_confirm=%s p0_suppress_after_demotions=%s hold_check_lines=%s hold_suppress_after=%s\n' \
+        "$CONFIG_AFFINITY" "$CONFIG_AGING_SECONDS" "$CONFIG_BLOCKED_CONFIRM" "$CONFIG_P0_SUPPRESS_AFTER_DEMOTIONS" \
+        "$CONFIG_HOLD_CHECK_LINES" "$CONFIG_HOLD_SUPPRESS_AFTER"
+    printf 'dispatch_hold: %s\n\n' "$hold_report"
 
     count=$(printf '%s' "$ranked" | jq 'length')
     if [ "$count" = "0" ]; then
@@ -884,6 +1021,33 @@ explain_decision() {
     ')
     winner_pane_id=$(printf '%s' "$ranked" | jq -r '.[0].pane_id // empty')
 
+    local hold_report hold_match hold_matched hold_kind hold_value hold_value_json departure_seq hold_state hold_exempt
+    hold_report='configured=false would_hold=false reason=unconfigured'
+    if _hold_configured; then
+        hold_match=$(_hold_match_departure "$departure_pane_id")
+        hold_matched=$(printf '%s' "$hold_match" | jq -r '.matched // false')
+        if [ "$hold_matched" = "true" ]; then
+            departure_seq=$(printf '%s' "$agents_json" | jq -r --arg p "$departure_pane_id" \
+                '[.[] | select(.pane_id == $p)][0].state_change_seq // 0')
+            hold_state="$state"
+            if [ -n "$(printf '%s' "$hold_state" | jq -r --arg p "$departure_pane_id" '.hold_seq[$p] // empty')" ] &&
+                [ "$(_hold_lineage_trusted "$hold_state" "$departure_pane_id" "$departure_seq")" != "true" ]; then
+                hold_state=$(_forget_stale_pane "$hold_state" "$departure_pane_id")
+            fi
+            hold_exempt=$(_hold_is_exempt "$hold_state" "$departure_pane_id" "$departure_seq")
+            hold_kind=$(printf '%s' "$hold_match" | jq -r '.kind // "keyword"')
+            hold_value=$(printf '%s' "$hold_match" | jq -r '.value // ""')
+            hold_value_json=$(jq -Rn --arg v "$hold_value" '$v')
+            if [ "$hold_exempt" = "true" ]; then
+                hold_report="configured=true would_hold=false reason=exempt matched_${hold_kind}=${hold_value_json}"
+            else
+                hold_report="configured=true would_hold=true reason=matched matched_${hold_kind}=${hold_value_json}"
+            fi
+        else
+            hold_report='configured=true would_hold=false reason=no-match'
+        fi
+    fi
+
     _explain_write_artifact "$winner_pane_id" "$ranked"
-    _print_explain_report "$departure_pane_id" "$dep_tab" "$dep_ws" "$dep_cwd" "$ranked" "$winner_pane_id"
+    _print_explain_report "$departure_pane_id" "$dep_tab" "$dep_ws" "$dep_cwd" "$ranked" "$winner_pane_id" "$hold_report"
 }
