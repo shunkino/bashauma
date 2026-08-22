@@ -31,13 +31,11 @@ CASES_DIR="$SCRIPT_DIR/cases"
 if [ -t 1 ]; then
     C_RED='\033[31m'
     C_GREEN='\033[32m'
-    C_YELLOW='\033[33m'
     C_BOLD='\033[1m'
     C_RESET='\033[0m'
 else
     C_RED=''
     C_GREEN=''
-    C_YELLOW=''
     C_BOLD=''
     C_RESET=''
 fi
@@ -89,6 +87,11 @@ done
 printf '%s=== bashauma test summary ===%s\n' "$C_BOLD" "$C_RESET"
 printf 'total: %d  %spassed: %d%s  %sfailed: %d%s\n' \
     "$total" "$C_GREEN" "$passed" "$C_RESET" "$C_RED" "$failed" "$C_RESET"
+
+if [ "$total" -eq 0 ]; then
+    printf '%sno test cases matched%s\n' "$C_RED" "$C_RESET"
+    exit 1
+fi
 
 if [ "$failed" -gt 0 ]; then
     printf '%sfailed cases:%s%s\n' "$C_RED" "$C_RESET" "$failed_names"

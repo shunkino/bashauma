@@ -13,8 +13,6 @@
 set -u
 . "$(dirname "$0")/../lib/harness.sh"
 
-not_implemented=0
-
 # --- Scenario A: fed panes skipped across an epoch; winner fires once ------
 setup_test
 
@@ -30,7 +28,6 @@ rc1=$?
 
 if [ "$rc1" -eq 127 ]; then
     fail_not_implemented "BASHAUMA_SCHEDULER_CMD (epoch tracking / §6.3)"
-    not_implemented=1
 else
     assert_focus_called_with "p2" "first dispatch (p1) hands off to earliest hungry pane (p2)"
 

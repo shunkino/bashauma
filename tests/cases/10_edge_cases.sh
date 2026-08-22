@@ -81,7 +81,6 @@ else
     # already received focus (not fed until it itself is dispatched), the
     # important invariant is simply: no crash, and p_repeat is never
     # re-targeted as if newly runnable.
-    calls_before=$(focus_call_count)
     invoke_status_changed "p_repeat" "working"
     assert_exit_code 0 "$?" "re-dispatching an already-fed pane does not error"
 fi
