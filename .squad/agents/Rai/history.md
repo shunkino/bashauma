@@ -21,3 +21,5 @@ Initial setup complete.
 - **Doc/code drift on privacy-relevant behavior is a distinct finding category from actual code bugs.** bashauma's README described a "finish-focus" + pane-viewport-diffing activity check that prd.md explicitly says was removed in v1 and that does not exist in the shipped code — worth flagging as advisory (ungrounded-claim-adjacent) even when the actual code turns out to be the *safer* of the two, because users can't audit privacy behavior correctly from docs that don't match the code.
 
 📌 Team update (2026-08-18T22:37:23+09:00): automatic RAI pass on bashauma v1 verdict Yellow (no persisted pane content, no blockers); both advisories (grep option-injection, file permissions) fixed by Keaton same session — decided by Rai.
+
+📌 Team update (2026-08-22T10:14:20+09:00): Issue #4 keyword transition hold shipped as bashauma 1.2.0 with dispatch-only holds, `next` as escape hatch, documented config/logging, and 21/21 tests passing. Issue #3 demotion-count decay remains blocked until real A-0 logs show same-lineage suppression harm; #3 should reuse the lineage-check skeleton extracted for #4 — decided by Keaton, Fenster, Hockney, and Verbal.
