@@ -1,3 +1,12 @@
 {
-  "version": 1
+  "version": 1,
+  "defaultModel": "claude-sonnet-5",
+  "agentModelOverrides": {
+    "Keaton": "claude-opus-5",
+    "Fact Checker": "claude-opus-5",
+    "Rai": "claude-opus-5",
+    "Scribe": "mai-code-1.1-flash",
+    "Ralph": "mai-code-1.1-flash",
+    "Verbal": "gpt-5.6-sol"
+  }
 }
